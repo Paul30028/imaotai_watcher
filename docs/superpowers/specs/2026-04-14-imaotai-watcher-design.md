@@ -30,11 +30,20 @@ Browser
   └─→ Nginx :80
         ├─→ /         → React 静态文件
         └─→ /api/     → FastAPI :8000
-                            │
-                          MySQL
-                            │
-                      Scheduler（独立容器，连接同一 MySQL）
+                            │         │
+                          MySQL     Redis
+                            │         │
+                      Scheduler（独立容器，连接同一 MySQL + Redis）
 ```
+
+**Redis 使用场景（4处）：**
+
+| 场景 | Key 设计 | 说明 |
+|------|---------|------|
+| 调度器心跳 | `scheduler:heartbeat`（TTL 60s） | 替代 scheduler_state 表轮询，API 读 key 是否存在判断存活 |
+| 手动触发申购 | `scheduler:trigger`（List，LPUSH/BRPOP） | API LPUSH 消息，Scheduler BRPOP 阻塞等待，实现跨进程通知 |
+| 验证码防刷 | `sms:limit:{phone}`（TTL 60s） | 发送验证码接口限流，60秒内只允许发一次 |
+| 接口缓存 | `cache:stats`（TTL 300s） | `/api/logs/stats` 统计数据缓存，避免每次重算近7日数据 |
 
 ### 目录结构
 
@@ -147,7 +156,7 @@ imaotai_watcher/
 | last_heartbeat | DATETIME | 调度器进程心跳 |
 | schedule_time | VARCHAR | 申购时间，默认 "09:00" |
 
-API 通过此表判断调度器是否存活（心跳超过 5 分钟未更新视为异常）。
+调度器心跳改由 Redis key `scheduler:heartbeat`（TTL 60s）维护，此表仅保留 `next_run_at`、`last_run_at`、`schedule_time` 三个字段用于持久化。API 读 Redis key 是否存在判断调度器存活，不再轮询数据库。
 
 ---
 
@@ -261,16 +270,15 @@ viewer 角色只有读权限，写操作返回 403。
 
 | 服务 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
-| mysql | mysql:8.0 | 3306（内部） | 数据库 |
+| redis | redis:7-alpine | 6379（内部） | 缓存 + 跨进程通信 |
 | api | backend:latest | 8000（内部） | FastAPI + uvicorn |
 | scheduler | backend:latest | 无 | APScheduler 独立进程 |
 | nginx | nginx:alpine | 80 | 静态文件 + 反代 |
 
+MySQL 使用外部已有实例，不纳入 docker-compose 管理。  
 api 和 scheduler 共用同一个 backend 镜像，通过不同 CMD 启动：
 - api：`uvicorn main:app --host 0.0.0.0 --port 8000`
 - scheduler：`python scheduler/main.py`
-
-两个容器均通过环境变量连接同一 MySQL 实例，MySQL 数据目录挂载到 `mysql_data` volume 持久化。
 
 ### 环境变量（.env）
 ```
@@ -281,19 +289,24 @@ JWT_SECRET=<随机字符串>
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=<初始密码>
 
-# MySQL 连接
-MYSQL_HOST=mysql
+# MySQL 连接（外部实例）
+MYSQL_HOST=<host>
 MYSQL_PORT=3306
 MYSQL_DATABASE=imaotai
 MYSQL_USER=imaotai
 MYSQL_PASSWORD=<数据库密码>
-MYSQL_ROOT_PASSWORD=<root密码>
+
+# Redis 连接
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_PASSWORD=
 ```
 
-`database.py` 从环境变量组装连接串：
-`mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}`
-
+`database.py` 从环境变量组装 MySQL 连接串：  
+`mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}`  
 SQLAlchemy 使用连接池（pool_pre_ping=True），自动处理断连重连。
+
+`redis_client.py` 从环境变量初始化 redis-py 连接，api 和 scheduler 容器均复用同一 Redis 服务。
 
 ### 启动
 ```bash
