@@ -31,9 +31,9 @@ Browser
         ├─→ /         → React 静态文件
         └─→ /api/     → FastAPI :8000
                             │
-                      SQLite (shared volume: /data)
+                          MySQL
                             │
-                      Scheduler（独立容器，共享 /data volume）
+                      Scheduler（独立容器，连接同一 MySQL）
 ```
 
 ### 目录结构
@@ -62,7 +62,6 @@ imaotai_watcher/
 │   │   ├── signature.py       # 请求签名算法
 │   │   ├── time_sync.py       # 时间同步
 │   │   └── logger.py          # 日志配置
-│   ├── data/                  # SQLite 数据库（volume 挂载点）
 │   ├── main.py                # FastAPI 应用入口
 │   ├── database.py            # SQLAlchemy 连接配置
 │   ├── requirements.txt
@@ -92,7 +91,7 @@ imaotai_watcher/
 
 ## 3. 数据模型
 
-### SQLite 表（5张）
+### MySQL 表（5张）
 
 #### users — 系统登录用户
 | 字段 | 类型 | 说明 |
@@ -262,6 +261,7 @@ viewer 角色只有读权限，写操作返回 403。
 
 | 服务 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
+| mysql | mysql:8.0 | 3306（内部） | 数据库 |
 | api | backend:latest | 8000（内部） | FastAPI + uvicorn |
 | scheduler | backend:latest | 无 | APScheduler 独立进程 |
 | nginx | nginx:alpine | 80 | 静态文件 + 反代 |
@@ -270,14 +270,30 @@ api 和 scheduler 共用同一个 backend 镜像，通过不同 CMD 启动：
 - api：`uvicorn main:app --host 0.0.0.0 --port 8000`
 - scheduler：`python scheduler/main.py`
 
-两个容器挂载同一个 `data` volume（包含 SQLite 数据库文件）。
+两个容器均通过环境变量连接同一 MySQL 实例，MySQL 数据目录挂载到 `mysql_data` volume 持久化。
 
 ### 环境变量（.env）
 ```
+# JWT
 JWT_SECRET=<随机字符串>
+
+# 初始管理员
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=<初始密码>
+
+# MySQL 连接
+MYSQL_HOST=mysql
+MYSQL_PORT=3306
+MYSQL_DATABASE=imaotai
+MYSQL_USER=imaotai
+MYSQL_PASSWORD=<数据库密码>
+MYSQL_ROOT_PASSWORD=<root密码>
 ```
+
+`database.py` 从环境变量组装连接串：
+`mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}`
+
+SQLAlchemy 使用连接池（pool_pre_ping=True），自动处理断连重连。
 
 ### 启动
 ```bash
@@ -316,7 +332,7 @@ Scheduler 09:00 触发
 | token 过期 | 账号标记 expired，Server酱告警，跳过该账号 |
 | 调度器进程崩溃 | API 通过心跳超时检测，Dashboard 显示异常状态 |
 | 前端 JWT 过期 | axios 拦截器捕获 401，自动跳转登录页 |
-| 数据库写冲突 | SQLite WAL 模式，api 和 scheduler 并发写安全 |
+| 数据库连接断开 | SQLAlchemy pool_pre_ping=True，自动重连 |
 
 ---
 
