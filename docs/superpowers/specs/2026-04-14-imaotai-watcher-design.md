@@ -270,12 +270,11 @@ viewer 角色只有读权限，写操作返回 403。
 
 | 服务 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
-| redis | redis:7-alpine | 6379（内部） | 缓存 + 跨进程通信 |
 | api | backend:latest | 8000（内部） | FastAPI + uvicorn |
 | scheduler | backend:latest | 无 | APScheduler 独立进程 |
 | nginx | nginx:alpine | 80 | 静态文件 + 反代 |
 
-MySQL 使用外部已有实例，不纳入 docker-compose 管理。  
+MySQL 和 Redis 均使用外部已有实例，不纳入 docker-compose 管理。  
 api 和 scheduler 共用同一个 backend 镜像，通过不同 CMD 启动：
 - api：`uvicorn main:app --host 0.0.0.0 --port 8000`
 - scheduler：`python scheduler/main.py`
