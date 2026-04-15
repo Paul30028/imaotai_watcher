@@ -86,10 +86,13 @@ def account_login(account_id: int, body: VerifyLoginRequest, db: Session = Depen
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
         result = imaotai_login(account.phone, body.verify_code, account.device_id)
-        token = result.get("data", {}).get("token") or result.get("token")
+        data = result.get("data") or result
+        token = data.get("token") or data.get("accessToken")
+        user_id = str(data.get("userId") or data.get("user_id") or "")
         if not token:
             raise HTTPException(status_code=400, detail=f"登录失败: {result}")
         account.token = token
+        account.user_id = user_id
         account.status = "active"
         account.last_login = datetime.utcnow()
         db.commit()

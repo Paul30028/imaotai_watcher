@@ -26,6 +26,8 @@ export default function Login() {
       const loginRes = await login(values.username, values.password)
       const accessToken = loginRes.data.access_token
 
+      // 先存 token，axios 拦截器才能在 getMe() 时带上 Authorization header
+      setAuth(accessToken, '', '')
       const meRes = await getMe()
       const { username, role } = meRes.data
 

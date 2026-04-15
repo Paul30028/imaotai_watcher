@@ -2,7 +2,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy.orm import Session
 from models.models import Account, Product, PurchaseLog
-from core.imaotai_api import get_current_session, get_shops, reserve
+from core.imaotai_api import get_shops, reserve
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,12 +15,7 @@ def purchase_for_account(account: Account, products: list, db: Session) -> dict:
     """对单个账号执行申购，返回 {success: n, fail: n}"""
     success_count = 0
     fail_count = 0
-
-    try:
-        session_id = get_current_session(account.device_id, account.token)
-    except Exception as e:
-        logger.error(f"[{account.phone}] 获取 session 失败: {e}")
-        return {"success": 0, "fail": len(products)}
+    user_id = account.user_id or ""
 
     for product in products:
         if not product.enabled:
@@ -30,16 +25,23 @@ def purchase_for_account(account: Account, products: list, db: Session) -> dict:
         message = ""
 
         try:
-            shops = get_shops(account.city_code, product.item_code, account.device_id, account.token)
+            shops = get_shops(account.city_code, account.device_id, account.token, user_id)
             if not shops:
                 message = "该城市无可用门店"
                 logger.warning(f"[{account.phone}] {product.item_name}: {message}")
             else:
-                shop_code = shops[0]["shopCode"]
+                shop_id = shops[0].get("shopId") or shops[0].get("shopCode", "")
                 for attempt in range(_MAX_RETRIES):
                     try:
-                        result = reserve(product.item_code, session_id, shop_code, account.device_id, account.token)
-                        if result.get("code") == 200:
+                        result = reserve(
+                            product.item_code,
+                            shop_id,
+                            account.device_id,
+                            account.token,
+                            user_id,
+                        )
+                        code = result.get("code") or result.get("status")
+                        if code == 200 or result.get("success"):
                             status = "success"
                             message = result.get("message", "申购成功")
                             success_count += 1

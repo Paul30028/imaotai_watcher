@@ -38,6 +38,7 @@ class AccountOut(BaseModel):
     id: int
     phone: str
     device_id: str
+    user_id: str | None
     city_code: str
     status: str
     last_login: datetime | None

@@ -22,6 +22,7 @@ class Account(Base):
     id = Column(Integer, primary_key=True, index=True)
     phone = Column(String(16), unique=True, nullable=False, index=True)
     token = Column(Text, nullable=True)
+    user_id = Column(String(64), nullable=True)   # i茅台 userId，签名需要
     device_id = Column(String(64), nullable=False)
     city_code = Column(String(16), nullable=False)
     status = Column(String(16), nullable=False, default="active")  # active / expired
