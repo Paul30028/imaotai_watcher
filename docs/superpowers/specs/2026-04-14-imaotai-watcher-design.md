@@ -4,6 +4,13 @@
 **项目：** imaotai_watcher — i茅台自动抢购软件  
 **参考：** https://github.com/wudizhanshen012/imaotai_autobuy
 
+> **2026-08-30 更新说明**：本文档记录的是最初的骨架设计。实际实现中
+> `backend/core/imaotai_api.py` / `backend/utils/signature.py` 最初对接的接口契约是
+> 虚构的、未跑通过真实后端，已改为对接逆向自
+> [oddfar/campus-imaotai](https://github.com/oddfar/campus-imaotai) 并做过单测验证的
+> 真实接口契约；数据模型、调度策略（错峰申购、结果确认）也相应调整。以 README.md 和
+> 代码为准，本文档仅保留作为架构演进的历史记录。
+
 ---
 
 ## 1. 需求概述

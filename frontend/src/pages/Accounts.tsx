@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
-  Button, Form, Input, message, Modal, Popconfirm,
-  Space, Steps, Table, Tag, Typography
+  Button, Form, Input, InputNumber, message, Modal, Popconfirm,
+  Radio, Space, Steps, Switch, Table, Tag, Typography
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
-import type { Account } from '../api/accounts'
+import type { Account, AccountCreatePayload, AccountUpdatePayload } from '../api/accounts'
 import {
   accountLogin,
   createAccount,
@@ -24,6 +24,88 @@ interface AddFlowState {
   accountId: number | null
 }
 
+interface AccountFormValues {
+  phone: string
+  province_name: string
+  city_name: string
+  lat: string
+  lng: string
+  shop_type: number
+  random_minute: boolean
+  fixed_minute?: number
+}
+
+function LocationFields() {
+  return (
+    <>
+      <Space.Compact block>
+        <Form.Item
+          name="province_name"
+          label="省份"
+          rules={[{ required: true, message: '请输入省份' }]}
+          style={{ width: '50%' }}
+        >
+          <Input placeholder="如 广东省" />
+        </Form.Item>
+        <Form.Item
+          name="city_name"
+          label="城市"
+          rules={[{ required: true, message: '请输入城市' }]}
+          style={{ width: '50%' }}
+        >
+          <Input placeholder="如 深圳市" />
+        </Form.Item>
+      </Space.Compact>
+      <Space.Compact block>
+        <Form.Item
+          name="lat"
+          label="纬度"
+          rules={[{ required: true, message: '请输入纬度' }]}
+          style={{ width: '50%' }}
+        >
+          <Input placeholder="如 22.543099" />
+        </Form.Item>
+        <Form.Item
+          name="lng"
+          label="经度"
+          rules={[{ required: true, message: '请输入经度' }]}
+          style={{ width: '50%' }}
+        >
+          <Input placeholder="如 114.057868" />
+        </Form.Item>
+      </Space.Compact>
+      <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
+        经纬度可在地图 App 上长按定位点获取，用于按距离选择门店（申购类型为"最近门店"时）。
+      </Typography.Text>
+      <Form.Item name="shop_type" label="门店选择方式" initialValue={1}>
+        <Radio.Group>
+          <Radio value={1}>本市出货量最大的门店</Radio>
+          <Radio value={2}>距离最近的门店</Radio>
+        </Radio.Group>
+      </Form.Item>
+      <Form.Item name="random_minute" label="随机分钟错峰申购" valuePropName="checked" initialValue={true}>
+        <Switch />
+      </Form.Item>
+      <Form.Item
+        noStyle
+        shouldUpdate={(prev, cur) => prev.random_minute !== cur.random_minute}
+      >
+        {({ getFieldValue }) =>
+          !getFieldValue('random_minute') && (
+            <Form.Item
+              name="fixed_minute"
+              label="固定分钟 (1-59)"
+              rules={[{ required: true, message: '请输入固定分钟' }]}
+            >
+              <InputNumber min={1} max={59} style={{ width: '100%' }} />
+            </Form.Item>
+          )
+        }
+      </Form.Item>
+    </>
+  )
+}
+
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(false)
@@ -32,9 +114,9 @@ export default function Accounts() {
   const [editTarget, setEditTarget] = useState<Account | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
-  const [addForm] = Form.useForm()
+  const [addForm] = Form.useForm<AccountFormValues>()
   const [verifyForm] = Form.useForm()
-  const [editForm] = Form.useForm()
+  const [editForm] = Form.useForm<AccountFormValues>()
 
   const fetchAccounts = async () => {
     setLoading(true)
@@ -75,7 +157,15 @@ export default function Accounts() {
 
   const openEditModal = (account: Account) => {
     setEditTarget(account)
-    editForm.setFieldsValue({ city_code: account.city_code })
+    editForm.setFieldsValue({
+      province_name: account.province_name,
+      city_name: account.city_name,
+      lat: account.lat,
+      lng: account.lng,
+      shop_type: account.shop_type,
+      random_minute: account.random_minute,
+      fixed_minute: account.fixed_minute ?? undefined,
+    })
     setModalMode('edit')
   }
 
@@ -89,7 +179,7 @@ export default function Accounts() {
 
   // Step 1: create account + send SMS
   const handleSendCode = async () => {
-    let values: { phone: string; city_code: string }
+    let values: AccountFormValues
     try {
       values = await addForm.validateFields()
     } catch {
@@ -97,7 +187,17 @@ export default function Accounts() {
     }
     setSubmitting(true)
     try {
-      const res = await createAccount(values.phone, values.city_code)
+      const payload: AccountCreatePayload = {
+        phone: values.phone,
+        province_name: values.province_name,
+        city_name: values.city_name,
+        lat: values.lat,
+        lng: values.lng,
+        shop_type: values.shop_type,
+        random_minute: values.random_minute,
+        fixed_minute: values.random_minute ? null : values.fixed_minute,
+      }
+      const res = await createAccount(payload)
       const newId = res.data.id
       await sendVerifyCode(newId)
       message.success('验证码已发送')
@@ -133,7 +233,7 @@ export default function Accounts() {
   }
 
   const handleEdit = async () => {
-    let values: { city_code: string }
+    let values: AccountFormValues
     try {
       values = await editForm.validateFields()
     } catch {
@@ -142,7 +242,16 @@ export default function Accounts() {
     if (!editTarget) return
     setSubmitting(true)
     try {
-      await updateAccount(editTarget.id, { city_code: values.city_code })
+      const payload: AccountUpdatePayload = {
+        province_name: values.province_name,
+        city_name: values.city_name,
+        lat: values.lat,
+        lng: values.lng,
+        shop_type: values.shop_type,
+        random_minute: values.random_minute,
+        fixed_minute: values.random_minute ? null : values.fixed_minute,
+      }
+      await updateAccount(editTarget.id, payload)
       message.success('更新成功')
       closeModal()
       fetchAccounts()
@@ -173,9 +282,23 @@ export default function Accounts() {
       key: 'phone',
     },
     {
-      title: '城市编码',
-      dataIndex: 'city_code',
-      key: 'city_code',
+      title: '省市',
+      key: 'location',
+      render: (_, record) => `${record.province_name} ${record.city_name}`,
+    },
+    {
+      title: '门店类型',
+      dataIndex: 'shop_type',
+      key: 'shop_type',
+      render: (val: number) => (val === 1 ? '本市出货最大' : '距离最近'),
+    },
+    {
+      title: '今日申购分钟',
+      key: 'target_minute',
+      render: (_, record) =>
+        record.target_minute != null
+          ? `窗口内第 ${record.target_minute} 分钟`
+          : '未分配（凌晨自动分配）',
     },
     {
       title: '状态',
@@ -274,13 +397,7 @@ export default function Accounts() {
             >
               <Input placeholder="请输入手机号" maxLength={11} />
             </Form.Item>
-            <Form.Item
-              name="city_code"
-              label="城市编码"
-              rules={[{ required: true, message: '请输入城市编码' }]}
-            >
-              <Input placeholder="请输入城市编码，如 510100" />
-            </Form.Item>
+            <LocationFields />
           </Form>
         )}
 
@@ -309,13 +426,7 @@ export default function Accounts() {
         destroyOnClose
       >
         <Form form={editForm} layout="vertical">
-          <Form.Item
-            name="city_code"
-            label="城市编码"
-            rules={[{ required: true, message: '请输入城市编码' }]}
-          >
-            <Input placeholder="请输入城市编码，如 510100" />
-          </Form.Item>
+          <LocationFields />
         </Form>
       </Modal>
     </div>
