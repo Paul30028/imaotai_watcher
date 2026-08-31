@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 from core.purchase import purchase_for_account
+from core.imaotai_api import MoutaiError
 
 
 def _make_account():
@@ -8,7 +9,12 @@ def _make_account():
     acc.phone = "13800138000"
     acc.token = "test_token"
     acc.device_id = "test_device"
-    acc.city_code = "500100"
+    acc.user_id = "12345"
+    acc.province_name = "广东省"
+    acc.city_name = "深圳市"
+    acc.lat = "22.543099"
+    acc.lng = "114.057868"
+    acc.shop_type = 1
     acc.status = "active"
     return acc
 
@@ -26,9 +32,9 @@ def test_purchase_success_writes_log():
     products = [_make_product()]
     db = MagicMock()
 
-    with patch("core.purchase.get_current_session", return_value=1), \
-         patch("core.purchase.get_shops", return_value=[{"shopCode": "shop001"}]), \
-         patch("core.purchase.reserve", return_value={"code": 200, "message": "success"}):
+    with patch("core.purchase.pick_shop_id", return_value="shop001"), \
+         patch("core.purchase.reserve_item", return_value={"code": 2000, "data": {"successDesc": "申购成功"}}), \
+         patch("core.purchase.time.sleep"):
         result = purchase_for_account(account, products, db)
 
     assert result["success"] == 1
@@ -42,13 +48,14 @@ def test_purchase_fail_retries_3_times():
     products = [_make_product()]
     db = MagicMock()
 
-    with patch("core.purchase.get_current_session", return_value=1), \
-         patch("core.purchase.get_shops", return_value=[{"shopCode": "shop001"}]), \
-         patch("core.purchase.reserve", side_effect=Exception("API error")), \
-         patch("core.purchase.time.sleep"):
+    with patch("core.purchase.pick_shop_id", return_value="shop001"), \
+         patch("core.purchase.reserve_item", side_effect=MoutaiError("库存不足")), \
+         patch("core.purchase.time.sleep") as mock_sleep:
         result = purchase_for_account(account, products, db)
 
     assert result["fail"] == 1
+    # 3 次重试，其中 2 次重试间隔 sleep(1)，外加商品间隔 sleep(3~5)
+    assert mock_sleep.call_count >= 3
 
 
 def test_purchase_no_shops_skips_product():
@@ -56,8 +63,24 @@ def test_purchase_no_shops_skips_product():
     products = [_make_product()]
     db = MagicMock()
 
-    with patch("core.purchase.get_current_session", return_value=1), \
-         patch("core.purchase.get_shops", return_value=[]):
+    with patch("core.purchase.pick_shop_id", side_effect=MoutaiError("该省份今日无该商品在售门店")), \
+         patch("core.purchase.time.sleep"):
         result = purchase_for_account(account, products, db)
 
     assert result["fail"] == 1
+
+
+def test_purchase_auth_error_marks_account_expired():
+    account = _make_account()
+    products = [_make_product()]
+    db = MagicMock()
+
+    with patch("core.purchase.pick_shop_id", return_value="shop001"), \
+         patch("core.purchase.reserve_item", side_effect=MoutaiError("token已失效，请重新登录")), \
+         patch("core.purchase.send_server_chan") as mock_notify, \
+         patch("core.purchase.time.sleep"):
+        result = purchase_for_account(account, products, db)
+
+    assert result["fail"] == 1
+    assert account.status == "expired"
+    mock_notify.assert_called_once()

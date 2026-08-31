@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Button, Form, Input, message, Modal, Popconfirm, Switch, Table, Tabs } from 'antd'
+import { Button, Form, Input, Select, message, Modal, Popconfirm, Switch, Table, Tabs } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { listAccounts } from '../api/accounts'
-import type { Account } from '../api/accounts'
+import { getTodayItems, listAccounts } from '../api/accounts'
+import type { Account, TodayItem } from '../api/accounts'
 import { createProduct, deleteProduct, listProducts, updateProduct } from '../api/products'
 import type { Product } from '../api/products'
 
@@ -80,6 +80,24 @@ interface AddProductModalProps {
 function AddProductModal({ open, accountId, onClose, onSuccess }: AddProductModalProps) {
   const [form] = Form.useForm()
   const [submitting, setSubmitting] = useState(false)
+  const [todayItems, setTodayItems] = useState<TodayItem[]>([])
+  const [loadingItems, setLoadingItems] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setLoadingItems(true)
+    getTodayItems()
+      .then((res) => setTodayItems(res.data))
+      .catch(() => message.error('获取今日在售商品失败，请确认调度器已成功刷新过场次数据'))
+      .finally(() => setLoadingItems(false))
+  }, [open])
+
+  const handleItemSelect = (itemId: string) => {
+    const item = todayItems.find((i) => i.item_id === itemId)
+    if (item) {
+      form.setFieldsValue({ item_name: item.title || item.item_code || itemId })
+    }
+  }
 
   const handleOk = async () => {
     try {
@@ -117,21 +135,28 @@ function AddProductModal({ open, accountId, onClose, onSuccess }: AddProductModa
       confirmLoading={submitting}
       okText="确认"
       cancelText="取消"
+      destroyOnClose
     >
       <Form form={form} layout="vertical">
         <Form.Item
-          label="商品名称"
-          name="item_name"
-          rules={[{ required: true, message: '请输入商品名称' }]}
-        >
-          <Input placeholder="请输入商品名称" />
-        </Form.Item>
-        <Form.Item
-          label="商品编码"
+          label="今日在售商品"
           name="item_code"
-          rules={[{ required: true, message: '请输入商品编码' }]}
+          rules={[{ required: true, message: '请选择商品' }]}
+          extra="商品编码(itemId)每天可能变化，请从当日在售列表中选择，不要手填。"
         >
-          <Input placeholder="请输入商品编码" />
+          <Select
+            loading={loadingItems}
+            placeholder="选择当日在售商品"
+            onChange={handleItemSelect}
+            options={todayItems.map((i) => ({
+              value: i.item_id,
+              label: `${i.title || i.item_code || i.item_id}（itemId: ${i.item_id}）`,
+            }))}
+            notFoundContent={loadingItems ? '加载中...' : '暂无数据，可能今日场次尚未刷新'}
+          />
+        </Form.Item>
+        <Form.Item label="商品名称" name="item_name" rules={[{ required: true, message: '请选择商品' }]}>
+          <Input disabled placeholder="选择商品后自动填充" />
         </Form.Item>
       </Form>
     </Modal>

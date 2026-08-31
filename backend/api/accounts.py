@@ -1,12 +1,12 @@
-import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from api.deps import get_db, get_current_user, require_admin
 from models.models import Account
-from schemas.schemas import AccountCreate, AccountUpdate, AccountOut, VerifyLoginRequest, MessageResponse
-from core.imaotai_api import send_verify_code, login as imaotai_login
+from schemas.schemas import AccountCreate, AccountUpdate, AccountOut, VerifyLoginRequest, MessageResponse, TodayItemOut
+from core.imaotai_api import send_verify_code, login as imaotai_login, get_today_items, MoutaiError
+from utils.signature import generate_device_id
 from redis_client import get_redis
 from utils.logger import get_logger
 
@@ -21,14 +21,36 @@ def list_accounts(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return db.query(Account).order_by(Account.created_at.desc()).all()
 
 
+@router.get("/today-items", response_model=list[TodayItemOut])
+def today_items(_=Depends(get_current_user)):
+    """当日在售商品列表，供商品配置页下拉选择使用。"""
+    try:
+        items = get_today_items()
+    except Exception as e:
+        # 既覆盖业务层的 MoutaiError（非2000返回码），也覆盖底层网络异常
+        # （超时/连接失败等），避免把原始堆栈暴露给前端。
+        logger.error(f"获取今日商品列表失败: {e}")
+        raise HTTPException(status_code=502, detail=f"获取今日商品列表失败: {e}")
+    return [
+        TodayItemOut(item_id=str(i.get("itemId")), item_code=i.get("itemCode"), title=i.get("title"))
+        for i in items
+    ]
+
+
 @router.post("", response_model=AccountOut)
 def create_account(body: AccountCreate, db: Session = Depends(get_db), _=Depends(require_admin)):
     if db.query(Account).filter(Account.phone == body.phone).first():
         raise HTTPException(status_code=400, detail="手机号已存在")
     account = Account(
         phone=body.phone,
-        city_code=body.city_code,
-        device_id=str(uuid.uuid4()),
+        province_name=body.province_name,
+        city_name=body.city_name,
+        lat=body.lat,
+        lng=body.lng,
+        shop_type=body.shop_type,
+        random_minute=body.random_minute,
+        fixed_minute=body.fixed_minute,
+        device_id=generate_device_id(),
         status="active",
     )
     db.add(account)
@@ -42,10 +64,10 @@ def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(g
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if body.city_code is not None:
-        account.city_code = body.city_code
-    if body.status is not None:
-        account.status = body.status
+    for field in ("province_name", "city_name", "lat", "lng", "shop_type", "random_minute", "fixed_minute", "status"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(account, field, value)
     db.commit()
     db.refresh(account)
     return account
@@ -85,14 +107,12 @@ def account_login(account_id: int, body: VerifyLoginRequest, db: Session = Depen
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        result = imaotai_login(account.phone, body.verify_code, account.device_id)
-        data = result.get("data") or result
-        token = data.get("token") or data.get("accessToken")
-        user_id = str(data.get("userId") or data.get("user_id") or "")
-        if not token:
-            raise HTTPException(status_code=400, detail=f"登录失败: {result}")
-        account.token = token
-        account.user_id = user_id
+        data = imaotai_login(account.phone, body.verify_code, account.device_id)
+        if not data.get("token"):
+            raise HTTPException(status_code=400, detail=f"登录失败: {data}")
+        account.token = data["token"]
+        account.cookie = data.get("cookie")
+        account.user_id = data["user_id"]
         account.status = "active"
         account.last_login = datetime.utcnow()
         db.commit()
@@ -100,5 +120,7 @@ def account_login(account_id: int, body: VerifyLoginRequest, db: Session = Depen
         return account
     except HTTPException:
         raise
+    except MoutaiError as e:
+        raise HTTPException(status_code=400, detail=f"登录失败: {e}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"登录失败: {e}")

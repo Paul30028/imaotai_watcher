@@ -22,9 +22,24 @@ class Account(Base):
     id = Column(Integer, primary_key=True, index=True)
     phone = Column(String(16), unique=True, nullable=False, index=True)
     token = Column(Text, nullable=True)
-    user_id = Column(String(64), nullable=True)   # i茅台 userId，签名需要
+    cookie = Column(Text, nullable=True)
+    user_id = Column(String(64), nullable=True)   # i茅台 userId，签名/下单需要
     device_id = Column(String(64), nullable=False)
-    city_code = Column(String(16), nullable=False)
+
+    # 真实接口按"省份+城市+经纬度"选门店，不是行政区划代码
+    province_name = Column(String(32), nullable=False, default="")
+    city_name = Column(String(32), nullable=False, default="")
+    lat = Column(String(32), nullable=False, default="")
+    lng = Column(String(32), nullable=False, default="")
+    # 1: 预约本市出货量最大的门店   2: 预约位置最近的门店
+    shop_type = Column(Integer, nullable=False, default=1)
+
+    # 每日 9 点申购窗口内，该账号被随机/固定分配到的分钟(1-59)，用于错峰申购
+    random_minute = Column(Boolean, nullable=False, default=True)
+    fixed_minute = Column(Integer, nullable=True)
+    target_minute = Column(Integer, nullable=True)       # 当日实际生效的分钟
+    target_minute_date = Column(String(10), nullable=True)  # 分配对应的日期 YYYY-MM-DD，跨天失效
+
     status = Column(String(16), nullable=False, default="active")  # active / expired
     last_login = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -38,7 +53,7 @@ class Product(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
-    item_code = Column(String(32), nullable=False)
+    item_code = Column(String(32), nullable=False)  # 当日在售商品的 itemId
     item_name = Column(String(128), nullable=False)
     enabled = Column(Boolean, default=True)
 
@@ -52,7 +67,7 @@ class PurchaseLog(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
     item_code = Column(String(32), nullable=False)
     item_name = Column(String(128), nullable=False)
-    status = Column(String(16), nullable=False)  # success / fail / retry
+    status = Column(String(16), nullable=False)  # success / fail / retry / confirmed
     message = Column(Text, nullable=True)
     purchased_at = Column(DateTime, default=datetime.utcnow, index=True)
 
@@ -63,7 +78,11 @@ class SchedulerState(Base):
     __tablename__ = "scheduler_state"
 
     id = Column(Integer, primary_key=True, default=1)
+    # 仅取 HH 作为申购窗口小时（i茅台固定 9:00-9:59 开放），分钟部分不再使用，
+    # 各账号在这一小时内按 random_minute/fixed_minute 错峰触发
     schedule_time = Column(String(8), nullable=False, default="09:00")
+    results_query_time = Column(String(8), nullable=False, default="18:05")
+    refresh_times = Column(String(64), nullable=False, default="07:10,07:55,08:10,08:55")
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)
 

@@ -102,16 +102,22 @@ export default function Settings() {
       <Title level={2}>设置</Title>
 
       <Card title="申购时间配置">
-        <Space>
-          <TimePicker
-            format="HH:mm"
-            value={scheduleTime}
-            onChange={(val) => setScheduleTime(val)}
-            placeholder="选择时间"
-          />
-          <Button type="primary" loading={savingSchedule} onClick={handleSaveSchedule}>
-            保存
-          </Button>
+        <Space direction="vertical">
+          <Space>
+            <TimePicker
+              format="HH:mm"
+              value={scheduleTime}
+              onChange={(val) => setScheduleTime(val)}
+              placeholder="选择时间"
+            />
+            <Button type="primary" loading={savingSchedule} onClick={handleSaveSchedule}>
+              保存
+            </Button>
+          </Space>
+          <Typography.Text type="secondary">
+            i茅台申购入口固定在整点小时内开放（如 9:00-9:59），这里只有小时部分生效；
+            具体每个账号在该小时内触发的分钟由账号管理页的"随机分钟"或"固定分钟"决定，用于错峰申购。
+          </Typography.Text>
         </Space>
       </Card>
 
