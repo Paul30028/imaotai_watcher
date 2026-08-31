@@ -140,10 +140,23 @@ docker-compose up -d
 |------|------|------|
 | 登录 | `/login` | 用户名 + 密码登录 |
 | 仪表盘 | `/dashboard` | 统计卡片、7日趋势图、最近申购记录（30秒自动刷新） |
-| 账号管理 | `/accounts` | 添加/编辑/删除 i茅台账号，短信验证码登录，刷新 token |
-| 商品配置 | `/products` | 配置全局或账号级申购商品，启用/禁用 |
-| 申购日志 | `/logs` | 查看历史申购记录，支持日期/账号/状态筛选 |
-| 系统设置 | `/settings` | 申购时间配置、Server酱 SendKey 配置、手动触发申购 |
+| 账号管理 | `/accounts` | 添加/编辑/删除 i茅台账号，短信验证码登录，刷新 token；填写省市+经纬度+门店选择方式+错峰分钟策略；列表显示今日实际分配到的申购分钟 |
+| 商品配置 | `/products` | 从当日在售商品接口 (`GET /api/accounts/today-items`) 下拉选择商品并配置全局或账号级申购项，启用/禁用 |
+| 申购日志 | `/logs` | 查看历史申购记录，支持日期/账号/状态筛选（status: success/fail/confirmed） |
+| 系统设置 | `/settings` | 申购窗口小时配置、Server酱 SendKey 配置、手动触发申购 |
+
+### 账号信息填写说明
+
+添加账号时除了手机号，还需要：
+
+| 字段 | 说明 |
+|------|------|
+| `province_name` / `city_name` | 完整省市名称，如"广东省"/"深圳市"，用于查询该省当日门店库存 |
+| `lat` / `lng` | 账号常用地址的纬度/经度，用于"距离最近门店"策略，也作为申购请求的 `MT-Lat`/`MT-Lng` 头。可在地图 App（高德/百度/Apple 地图）中长按目标位置获取坐标 |
+| `shop_type` | `1`=预约本市出货量最大的门店（本市查不到会自动退化为本省最近门店）；`2`=直接预约本省距离最近的门店 |
+| `random_minute` / `fixed_minute` | 是否在 9 点这一小时内随机分配申购分钟错峰；关闭后需指定 `fixed_minute`（1-59） |
+
+登录成功后，`token`/`cookie`/`userId` 会自动保存；账号列表的"今日申购分钟"列显示当天凌晨（01:10）自动分配的实际触发分钟。
 
 ## 申购流程
 
@@ -242,6 +255,20 @@ npm run dev
 npm run build
 ```
 
+## 验证状态
+
+以下内容已在本地起真实 MySQL + Redis 实测通过：数据库迁移（含旧表结构升级）、
+管理员登录、账号增删改查、调度器任务编排（每日随机分钟分配 + cron 注册）、
+并发申购的多线程 Session 隔离、前端 TypeScript 构建。
+
+**尚未用真实 i茅台账号验证过**：发送验证码 / 登录 / 查询今日商品 / 提交申购 /
+查询申购结果这几个真正对接 i茅台后端的调用。这几个接口的路径、请求头、AES 密钥
+都是照抄自 [oddfar/campus-imaotai](https://github.com/oddfar/campus-imaotai) 的
+可运行开源实现，逻辑上可信，但没有用真账号跑通过，也无法保证不随官方 App 更新失效。
+**首次部署后请先用一个真实手机号走一遍"发送验证码 → 登录"流程确认可用**，如果失败，
+把 api 容器日志（`docker-compose logs api`）里的报错发出来，可以针对性排查是接口
+变了还是配置问题。
+
 ## 常见问题
 
 **调度器状态显示"已停止"**
@@ -259,6 +286,21 @@ docker-compose logs scheduler
 **首次启动后无法登录**
 
 api 容器启动时会自动建表并创建管理员账号，确认 `.env` 中 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 与登录时输入一致，并检查 api 容器日志确认 "Database ready." 已输出。
+
+**商品配置页"今日在售商品"下拉为空**
+
+该列表来自 i茅台当日场次接口，需要 scheduler 容器完成过一次早晨的缓存刷新
+（07:10/07:55/08:10/08:55 任一时间点）才会有数据；也可以在服务器上手动触发一次：
+
+```bash
+docker-compose exec scheduler python -c "from core.imaotai_api import refresh_catalogue_cache; refresh_catalogue_cache()"
+```
+
+**升级到本版本后旧账号的门店信息为空**
+
+旧版本的 `city_code` 字段已废弃，`init_db.py` 会自动给已有的 `accounts` 表加上
+`province_name`/`city_name`/`lat`/`lng`/`shop_type` 等新列（默认空值），升级后需要
+在「账号管理」页编辑已有账号，补全省市和经纬度信息，否则申购时会报"门店为空"。
 
 ## 免责声明
 
