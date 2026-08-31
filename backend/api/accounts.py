@@ -7,7 +7,7 @@ from models.models import Account
 from schemas.schemas import AccountCreate, AccountUpdate, AccountOut, VerifyLoginRequest, MessageResponse, TodayItemOut
 from core.imaotai_api import send_verify_code, login as imaotai_login, get_today_items, MoutaiError
 from utils.signature import generate_device_id
-from redis_client import get_redis
+from utils.memcache import cache
 from utils.logger import get_logger
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -88,13 +88,12 @@ def send_verify(account_id: int, db: Session = Depends(get_db), _=Depends(requir
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    redis = get_redis()
     limit_key = f"sms:limit:{account.phone}"
-    if redis.exists(limit_key):
+    if cache.exists(limit_key):
         raise HTTPException(status_code=429, detail="60秒内只能发送一次验证码")
     try:
         send_verify_code(account.phone, account.device_id)
-        redis.setex(limit_key, SMS_LIMIT_TTL, "1")
+        cache.set(limit_key, True, SMS_LIMIT_TTL)
         return MessageResponse(message="验证码已发送")
     except Exception as e:
         logger.error(f"发送验证码失败: {e}")

@@ -1,17 +1,12 @@
-import json
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from api.deps import get_db, get_current_user
 from models.models import PurchaseLog, Account
-from redis_client import get_redis
 from schemas.schemas import LogsResponse, StatsResponse
 
 router = APIRouter(prefix="/logs", tags=["logs"])
-
-STATS_CACHE_KEY = "cache:stats"
-STATS_CACHE_TTL = 300  # 5 minutes
 
 
 @router.get("", response_model=LogsResponse)
@@ -42,11 +37,7 @@ def list_logs(
 
 @router.get("/stats", response_model=StatsResponse)
 def get_stats(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    redis = get_redis()
-    cached = redis.get(STATS_CACHE_KEY)
-    if cached:
-        return StatsResponse(**json.loads(cached))
-
+    # 单用户本地应用，这几条 COUNT 查询开销很小，不再需要额外缓存层。
     today = datetime.utcnow().date()
     today_start = datetime.combine(today, datetime.min.time())
 
@@ -77,11 +68,9 @@ def get_stats(db: Session = Depends(get_db), _=Depends(get_current_user)):
         ).count()
         trend.append({"date": day.isoformat(), "success": s, "fail": f})
 
-    result = StatsResponse(
+    return StatsResponse(
         total_accounts=total_accounts,
         today_success=today_success,
         today_fail=today_fail,
         trend=trend,
     )
-    redis.setex(STATS_CACHE_KEY, STATS_CACHE_TTL, result.model_dump_json())
-    return result

@@ -1,14 +1,13 @@
 import sys
 import os
 
-# Set required env vars before any app module is imported
+# Set required env vars before any app module is imported. database_url points
+# at the same sqlite file the `engine_test`/fixtures below use, so the app's
+# own lifespan (TestClient(app) triggers init_db()) and the test fixtures
+# operate on one consistent database instead of two different ones.
 os.environ.setdefault("jwt_secret", "test_secret")
 os.environ.setdefault("admin_password", "test_password")
-os.environ.setdefault("mysql_host", "localhost")
-os.environ.setdefault("mysql_database", "test_db")
-os.environ.setdefault("mysql_user", "test_user")
-os.environ.setdefault("mysql_password", "test_pass")
-os.environ.setdefault("redis_host", "localhost")
+os.environ.setdefault("database_url", "sqlite:///./test.db")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

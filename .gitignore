@@ -9,6 +9,11 @@ __pycache__/
 # local sqlite test db (backend/tests/conftest.py)
 backend/test.db
 
+# local sqlite app db + the frontend build that main.py serves as static
+# files when built via the root Dockerfile (both are generated, not source)
+backend/data/
+backend/static/
+
 # Distribution / packaging
 .Python
 build/

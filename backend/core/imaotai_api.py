@@ -21,8 +21,8 @@ from typing import Any
 
 import httpx
 
-from redis_client import get_redis
 from utils.logger import get_logger
+from utils.memcache import cache
 from utils.signature import aes_encrypt, md5_signature
 
 logger = get_logger(__name__)
@@ -59,22 +59,15 @@ class MoutaiError(RuntimeError):
 
 
 # --------------------------------------------------------------------- #
-# shared cache (Redis-backed so the `api` and `scheduler` containers see
-# the same warmed data instead of each re-fetching independently)
+# shared cache: in-process, since the scheduler now runs as a background
+# thread inside the same API process instead of a separate container.
 # --------------------------------------------------------------------- #
 def _cache_get(key: str) -> Any | None:
-    try:
-        raw = get_redis().get(_CACHE_PREFIX + key)
-    except Exception:  # noqa: BLE001 - cache is best-effort
-        return None
-    return json.loads(raw) if raw else None
+    return cache.get(_CACHE_PREFIX + key)
 
 
 def _cache_set(key: str, value: Any, ttl: int) -> None:
-    try:
-        get_redis().setex(_CACHE_PREFIX + key, ttl, json.dumps(value))
-    except Exception:  # noqa: BLE001
-        logger.warning("写入缓存失败: %s", key)
+    cache.set(_CACHE_PREFIX + key, value, ttl)
 
 
 def _day_start_ms() -> int:
@@ -314,10 +307,7 @@ def query_results(device_id: str, token: str) -> list[dict]:
 def refresh_catalogue_cache() -> None:
     """Force a re-fetch of version/session/shop data (used by the morning
     warm-up jobs so the reservation window doesn't pay the fetch cost)."""
-    try:
-        get_redis().delete(_CACHE_PREFIX + "version", _CACHE_PREFIX + "session_data", _CACHE_PREFIX + "shops")
-    except Exception:  # noqa: BLE001
-        pass
+    cache.delete(_CACHE_PREFIX + "version", _CACHE_PREFIX + "session_data", _CACHE_PREFIX + "shops")
     get_app_version()
     get_session_id()
     get_all_shops()
