@@ -76,13 +76,23 @@ class TestRequestRetryBehavior:
 class TestRealApiContract:
     def test_send_verify_code_success(self):
         with patch("core.imaotai_api._request", return_value={"code": 2000}) as mock_req:
-            send_verify_code("13800138000", "device-1")
+            send_verify_code("13800138000", "device-1", "22.54", "114.06")
         args, kwargs = mock_req.call_args
         assert args[0] == "POST"
         assert args[1] == imaotai_api._VCODE_URL
         body = kwargs["json"]
         assert body["mobile"] == "13800138000"
         assert "md5" in body and "timestamp" in body
+        # These were missing entirely before, which is a plausible reason the
+        # backend rejected vcode/login as not-a-real-app traffic -- locking
+        # in that they're actually sent now.
+        headers = args[2]
+        assert headers["MT-Bundle-ID"] == "com.moutai.mall"
+        assert headers["MT-Info"] == imaotai_api._MT_INFO_HEADER
+        assert headers["MT-Lat"] == "22.54"
+        assert headers["MT-Lng"] == "114.06"
+        assert headers["MT-R"]
+        assert headers["MT-K"]
 
     def test_send_verify_code_failure_raises(self):
         with patch("core.imaotai_api._request", return_value={"code": 4000, "message": "手机号格式错误"}):
