@@ -21,7 +21,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import random
-from datetime import date, datetime
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -39,6 +39,11 @@ logger = get_logger("scheduler")
 HEARTBEAT_KEY = "scheduler:heartbeat"
 TRIGGER_KEY = "scheduler:trigger"
 HEARTBEAT_TTL = 60  # seconds
+
+# i茅台的申购窗口是按北京时间定义的（固定 9:00-9:59），与容器/宿主机的系统时区
+# 无关（很多云主机默认是 UTC）。用固定偏移量而不是 IANA 时区名，这样不依赖
+# tzdata 是否安装在镜像里，所有 cron 触发和"当前分钟"判断都显式基于这个时区。
+CN_TZ = timezone(timedelta(hours=8))
 
 
 def get_send_key(db) -> str:
@@ -71,7 +76,7 @@ def _parse_hhmm(value: str, default: tuple[int, int] | None) -> tuple[int, int] 
 # --------------------------------------------------------------------- #
 def assign_daily_minutes_job() -> None:
     """每天窗口开始前，为所有 active 账号分配今天的 target_minute。"""
-    today = date.today().isoformat()
+    today = datetime.now(CN_TZ).date().isoformat()
     db = SessionLocal()
     try:
         accounts = db.query(Account).filter(Account.status == "active").all()
@@ -91,8 +96,8 @@ def assign_daily_minutes_job() -> None:
 
 def purchase_tick_job() -> None:
     """窗口小时内每分钟触发一次，只对命中当前分钟的账号申购。"""
-    now = datetime.now()
-    today = date.today().isoformat()
+    now = datetime.now(CN_TZ)
+    today = now.date().isoformat()
     db = SessionLocal()
     try:
         accounts = (
@@ -187,16 +192,27 @@ def reschedule(scheduler: BackgroundScheduler) -> None:
     scheduler.remove_all_jobs()
 
     scheduler.add_job(
-        assign_daily_minutes_job, CronTrigger(hour=1, minute=10), id="assign_minutes", replace_existing=True
+        assign_daily_minutes_job,
+        CronTrigger(hour=1, minute=10, timezone=CN_TZ),
+        id="assign_minutes",
+        replace_existing=True,
     )
     scheduler.add_job(
-        purchase_tick_job, CronTrigger(hour=window_hour, minute="*"), id="purchase_tick", replace_existing=True
+        purchase_tick_job,
+        CronTrigger(hour=window_hour, minute="*", timezone=CN_TZ),
+        id="purchase_tick",
+        replace_existing=True,
     )
     scheduler.add_job(
-        results_query_job, CronTrigger(hour=results_hour, minute=results_minute), id="results_query", replace_existing=True
+        results_query_job,
+        CronTrigger(hour=results_hour, minute=results_minute, timezone=CN_TZ),
+        id="results_query",
+        replace_existing=True,
     )
     for i, (h, m) in enumerate(refresh_points):
-        scheduler.add_job(refresh_job, CronTrigger(hour=h, minute=m), id=f"refresh_{i}", replace_existing=True)
+        scheduler.add_job(
+            refresh_job, CronTrigger(hour=h, minute=m, timezone=CN_TZ), id=f"refresh_{i}", replace_existing=True
+        )
 
     logger.info(
         f"调度器已配置: 申购窗口={window_hour:02d}点, "
