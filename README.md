@@ -77,6 +77,9 @@ imaotai_watcher/
 
 ## 快速开始
 
+> 下面是精简版部署步骤；完整的分步说明（含没有现成 MySQL/Redis 时怎么办、
+> 启动后如何逐项验证、常见故障排查）见 [RUNNING.md](./RUNNING.md)。
+
 ### 前置条件
 
 - Docker + Docker Compose
