@@ -1,6 +1,9 @@
 import json
 from unittest.mock import patch, MagicMock
 
+import httpx
+import pytest
+
 import core.imaotai_api as imaotai_api
 from core.imaotai_api import (
     MoutaiError,
@@ -12,6 +15,59 @@ from core.imaotai_api import (
     send_verify_code,
 )
 from utils.signature import aes_decrypt
+
+
+def _make_response(status_code: int) -> httpx.Response:
+    request = httpx.Request("POST", "https://app.moutai519.com.cn/xhr/front/user/register/vcode")
+    return httpx.Response(status_code, request=request, json={"code": status_code})
+
+
+class TestRequestRetryBehavior:
+    """A 4xx means the request itself won't succeed on retry -- most
+    importantly 429 (rate limited), where retrying immediately just
+    hammers an endpoint that already told us to back off. Only network
+    failures and 5xx are worth retrying."""
+
+    def test_429_is_not_retried(self):
+        response = _make_response(429)
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.HTTPStatusError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 1
+
+    def test_500_is_retried(self):
+        response = _make_response(500)
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.HTTPStatusError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 3
+
+    def test_network_error_is_retried(self):
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.side_effect = httpx.ConnectError("boom")
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.ConnectError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 3
 
 
 @patch("core.imaotai_api._cache_set", lambda *a, **k: None)

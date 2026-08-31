@@ -80,6 +80,16 @@ def _day_start_ms() -> int:
 _RETRY_DELAYS = [1, 2]  # seconds, applied after the first attempt
 
 
+def _is_retryable(exc: Exception) -> bool:
+    """4xx responses (bad request, auth, and critically 429 rate-limit) won't
+    succeed on an identical retry -- retrying them just hammers an endpoint
+    that already told us to back off. Only network-layer failures and 5xx
+    server errors are worth retrying."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return True
+
+
 def _request(method: str, url: str, headers: dict, **kwargs) -> dict:
     last_exc: Exception | None = None
     for attempt, delay in enumerate([0] + _RETRY_DELAYS):
@@ -93,6 +103,8 @@ def _request(method: str, url: str, headers: dict, **kwargs) -> dict:
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             logger.warning("%s %s 第%d次失败: %s", method, url, attempt + 1, exc)
+            if not _is_retryable(exc):
+                break
     raise last_exc  # type: ignore[misc]
 
 
