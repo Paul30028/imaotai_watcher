@@ -6,9 +6,11 @@ i茅台自动申购系统 — 支持多账号并发申购、Web 管理界面，*
 > **接口来源说明**：`backend/core/imaotai_api.py` 对接的是 i茅台 App 的私有接口，
 > 逆向自开源项目 [oddfar/campus-imaotai](https://github.com/oddfar/campus-imaotai)
 > 的 `IMTServiceImpl.java` / `IShopServiceImpl.java`（并做过 AES/MD5 签名的独立单测
-> 验证），**并非官方公开 API**。接口路径、请求头、AES 密钥等可能随官方 App 更新而失效，
-> 需要自行跟进维护；本项目仅供学习交流使用，请遵守 i茅台平台相关规定，合理使用，不用于
-> 批量注册小号、代抢倒卖等违反平台规则或法律法规的用途。
+> 验证），请求头字段又对照 [AkenClub/ken-iMoutai-Script](https://github.com/AkenClub/ken-iMoutai-Script)
+> 和 [397179459/iMaoTai-reserve](https://github.com/397179459/iMaoTai-reserve) 这两个
+> 有真实用户确认申购成功的活跃项目做过交叉验证，**并非官方公开 API**。接口路径、请求头、
+> AES 密钥等可能随官方 App 更新而失效，需要自行跟进维护；本项目仅供学习交流使用，请遵守
+> i茅台平台相关规定，合理使用，不用于批量注册小号、代抢倒卖等违反平台规则或法律法规的用途。
 
 ## 功能特性
 
@@ -24,6 +26,8 @@ i茅台自动申购系统 — 支持多账号并发申购、Web 管理界面，*
 - **Web 管理界面**：React + Ant Design，含数据统计图表
 - **JWT 鉴权**：admin / viewer 双角色，viewer 只读
 - **单容器部署**：`docker run` 一条命令启动，没有 MySQL/Redis 之类的外部依赖
+- **GitHub Actions 备用申购路径**：申购请求可选择从 GitHub 云端 IP 发出，避开本地
+  网络被限流的情况（见 [RUNNING.md「路径三」](./RUNNING.md#路径三github-actions绕开本地-ip-限流)）
 
 ## 系统架构
 
@@ -98,6 +102,11 @@ docker-compose up -d --build
 数据（账号、商品、日志）存在 Docker 具名 volume `imaotai-data` 里，重建/更新容器
 不会丢失；备份就是备份这一个 volume（或直接备份 `backend/data/imaotai.db` 这一
 个文件，如果你不用 volume 而是本机运行）。
+
+> 如果发验证码/申购持续报 `429 Too Many Requests`，通常是你本地网络的出口 IP
+> 被限流了，跟部署对不对没关系。除了 Docker/本地运行，仓库里还带了一份
+> GitHub Actions workflow（`.github/workflows/reserve.yml` + `backend/gh_action_reserve.py`），
+> 申购请求从 GitHub 的云端 IP 发出，天然绕开本地限流，见 [RUNNING.md「路径三」](./RUNNING.md#路径三github-actions绕开本地-ip-限流)。
 
 ## 页面说明
 

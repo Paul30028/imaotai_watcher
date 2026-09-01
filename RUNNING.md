@@ -1,9 +1,10 @@
 # 运行说明
 
-本文档是从零开始把 imaotai_watcher 跑起来的完整步骤，覆盖两条路径：
-**Docker 部署**（推荐，一条命令，接近生产环境）和 **本地开发运行**（不装 Docker，
-前后端分开跑，方便改代码时快速看效果）。README.md 里的"快速开始"是精简版，
-本文档是详细版。
+本文档是从零开始把 imaotai_watcher 跑起来的完整步骤，覆盖三条路径：
+**Docker 部署**（推荐，一条命令，接近生产环境）、**本地开发运行**（不装 Docker，
+前后端分开跑，方便改代码时快速看效果）和 **GitHub Actions**（申购请求从 GitHub
+的云端服务器发出，不受你本地网络 IP 限流影响，见下方路径三）。README.md 里
+的"快速开始"是精简版，本文档是详细版。
 
 > 在开始之前请先读 README.md 里的「验证状态」一节：本项目对接的是 i茅台 App 的
 > 私有接口（逆向来自 [oddfar/campus-imaotai](https://github.com/oddfar/campus-imaotai)），
@@ -99,6 +100,82 @@ npm run dev     # 默认 http://localhost:5173，自动把 /api/ 代理到 local
 
 ---
 
+## 路径三：GitHub Actions（绕开本地 IP 限流）
+
+**这条路径解决的是一个具体问题**：Docker/本地开发这两条路径，每次请求都是从
+你的电脑/服务器所在网络发出的。如果这个 IP 被 i茅台后端限流了（实测现象：
+连续测试一整天后，哪怕换了从未用过的手机号，发验证码依然稳定返回
+`429 Too Many Requests`），**同一网络下的所有账号都会被卡住，跟代码对不对
+没关系**。GitHub Actions 每次运行用的都是 GitHub 数据中心的 IP，跟你本地网络
+无关，天然绕开这个问题（做法参考了 [397179459/iMaoTai-reserve](https://github.com/397179459/iMaoTai-reserve)，
+一个用同样方式定时运行、有 480+ star 的开源项目）。
+
+**这条路径不需要也不使用 Docker 里的那个数据库**——账号信息通过 GitHub 仓库的
+Secrets 传进去。登录这一步（手机号 → 收验证码 → 换 token）仍然要通过路径一/二
+跑起来的 Web 界面完成一次，因为发短信这类交互式操作没法在 Actions 里做。
+
+### 1. 先用 Docker/本地开发跑一次登录，拿到三个值
+
+按路径一或路径二的步骤，把系统跑起来，添加账号、收验证码、完成登录。登录成功
+后，这个账号在数据库里就有了 `device_id`、`token`、`user_id` 三个值——可以在
+`账号管理` 页对应账号的详情/编辑里看到（或者直接看 `backend/data/imaotai.db`
+的 `accounts` 表）。
+
+### 2. 在 GitHub 仓库里配置 Secrets
+
+进入仓库 `Settings → Secrets and variables → Actions → New repository secret`，
+添加：
+
+- **`IMAOTAI_ACCOUNTS`**（必填）：一个 JSON 数组，每个账号一个对象：
+
+  ```json
+  [
+    {
+      "phone": "13800138000",
+      "device_id": "上一步拿到的 device_id",
+      "token": "上一步拿到的 token",
+      "user_id": "上一步拿到的 user_id",
+      "item_ids": ["10214"],
+      "shop_id": "AUTO",
+      "shop_type": 1,
+      "province": "广东省",
+      "city": "深圳市",
+      "lat": "22.543099",
+      "lng": "114.057868"
+    }
+  ]
+  ```
+
+  字段说明：`item_ids` 是要申购的商品 ID 列表（在商品配置页能查到）；
+  `shop_id` 填 `"AUTO"` 时会按 `shop_type`（1=同城库存最多的门店，2=距离最近的
+  门店）+ `province`/`city`/`lat`/`lng` 自动选店，跟 Docker 版账号配置里的逻辑
+  完全一致；也可以直接填一个具体的门店 ID 跳过自动选店。多个账号就在数组里多加
+  几个对象。
+
+- **`SERVERCHAN_KEY`**（选填）：Server 酱的 SendKey，配了就会在每次运行结束后
+  推送一条微信通知（成功/失败个数 + 每个商品的结果）。不配的话结果只能在
+  Actions 的运行日志里看。
+
+### 3. 确认定时任务已启用
+
+workflow 文件在 `.github/workflows/reserve.yml`，默认在北京时间 8:58 和 9:05
+各跑一次（申购窗口是 9:00-9:59，排两次是因为 GitHub 的 schedule 触发在高峰期
+可能延迟几分钟）。首次把 workflow 文件推送到默认分支后，去仓库的 `Actions`
+标签页确认它出现在左侧列表里、状态不是灰色的"disabled"。
+
+### 4. 手动跑一次验证
+
+不用等到明天 9 点——去 `Actions → i茅台申购（GitHub Actions 版）→ Run workflow`
+手动触发一次，几秒后刷新页面看运行日志，确认 `IMAOTAI_ACCOUNTS` 解析没报错、
+`reserve_item` 的返回结果符合预期（这一步同时也验证了 Secrets 填对了没有）。
+
+> 这条路径和 Docker/本地开发路径是可以同时用的：Web 界面继续用来管理账号、
+> 收验证码、看历史日志；真正在 9 点发出申购请求的，换成从 GitHub Actions 发出。
+> 如果之后账号 token 过期了（大概一个月一次），照样要回到 Web 界面重新登录一次，
+> 再把新的 token 更新进 `IMAOTAI_ACCOUNTS` 这个 Secret。
+
+---
+
 ## 启动后验证清单
 
 按顺序做，每一步都能独立确认系统这一层没问题：
@@ -142,6 +219,7 @@ npm run dev     # 默认 http://localhost:5173，自动把 /api/ 代理到 local
 | 容器起不来 / 一直重启 | `docker-compose logs -f` 看具体报错；检查 `.env` 里 `JWT_SECRET`/`ADMIN_PASSWORD` 是否都填了（这两个是必填项，没填会在启动时直接报 pydantic 校验错误退出） |
 | 浏览器登录一直 401 | 确认 `.env` 的 `ADMIN_USERNAME`/`ADMIN_PASSWORD` 和输入的完全一致；已建过管理员账号后再改 `.env` 密码不会生效（管理员账号只在数据库里没有时才会自动创建一次），需要去 SQLite 文件里改或删掉 volume 重新初始化 |
 | 发验证码/登录报错 | 见上方验证清单第 3 步；把具体报错内容发出来定位 |
+| 发验证码稳定返回 `429 Too Many Requests`，换手机号也一样 | 大概率是这个网络的出口 IP 被限流了，跟账号/代码无关。换个网络（比如手机热点）再试一次能确认；长期方案见上方「路径三：GitHub Actions」，用 GitHub 的云端 IP 绕开本地限流 |
 | 商品下拉框是空的 | 需要先跑过一次早晨刷新（见上方验证清单第 5 步），或手动触发 `refresh_catalogue_cache()` |
 | 数据重启后丢了 | 用 `docker run` 时忘了挂 `-v imaotai-data:/app/data`；不挂 volume 的话容器删掉数据就没了 |
 | 时区/申购时间不对 | 所有定时任务都在 `backend/scheduler/main.py` 里显式锁定为北京时间（UTC+8），与容器系统时区无关，如果观察到时间不对，先确认没有改动过这部分代码 |
