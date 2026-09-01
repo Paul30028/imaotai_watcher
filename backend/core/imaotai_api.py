@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,7 +26,7 @@ from utils.signature import aes_encrypt, md5_signature
 
 logger = get_logger(__name__)
 
-_APP_STORE_URL = "https://apps.apple.com/cn/app/i%E8%8C%85%E5%8F%B0/id1600482450"
+_ITUNES_LOOKUP_URL = "https://itunes.apple.com/cn/lookup?id=1600482450"
 _APP_BASE = "https://app.moutai519.com.cn"
 _STATIC_BASE = "https://static.moutai519.com.cn/mt-backend"
 _VCODE_URL = f"{_APP_BASE}/xhr/front/user/register/vcode"
@@ -121,14 +120,34 @@ def _request(method: str, url: str, headers: dict, **kwargs) -> dict:
 # --------------------------------------------------------------------- #
 # app version
 # --------------------------------------------------------------------- #
+_FALLBACK_APP_VERSION = "1.9.7"
+
+
 def get_app_version() -> str:
+    """The real app sends its App Store version in MT-APP-Version on every
+    call; a stale/missing one is a confirmed rejection cause (oddfar/
+    campus-imaotai#394 -> #397: an HTML-scraping regex against the App
+    Store page broke silently after Apple redesigned it to a JS-rendered
+    SPA, sent MT-APP-Version: null, and got code 4821 back). That fix
+    switched to the iTunes lookup API, which both AkenClub/ken-iMoutai-
+    Script and 397179459/iMaoTai-reserve also use -- real JSON, not HTML
+    scraping, so it isn't exposed to future page-markup changes the same
+    way. Same approach here."""
     cached = _cache_get("version")
     if cached:
         return cached
-    with httpx.Client(timeout=_TIMEOUT, proxy=_PROXY) as client:
-        resp = client.get(_APP_STORE_URL)
-    match = re.search(r'new__latest__version">(.*?)</p>', resp.text, re.DOTALL)
-    version = match.group(1).replace("版本 ", "").strip() if match else "1.7.6"
+    version = _FALLBACK_APP_VERSION
+    try:
+        with httpx.Client(timeout=_TIMEOUT, proxy=_PROXY) as client:
+            resp = client.get(_ITUNES_LOOKUP_URL)
+            resp.raise_for_status()
+        results = resp.json().get("results") or []
+        if results and results[0].get("version"):
+            version = results[0]["version"]
+        else:
+            logger.warning("iTunes lookup 返回空结果，使用回退版本号 %s", version)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("获取 App 版本号失败，使用回退版本号 %s: %s", version, e)
     _cache_set("version", version, _CACHE_TTL_VERSION)
     return version
 

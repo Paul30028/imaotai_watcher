@@ -72,6 +72,53 @@ class TestRequestRetryBehavior:
 
 @patch("core.imaotai_api._cache_set", lambda *a, **k: None)
 @patch("core.imaotai_api._cache_get", lambda *a, **k: None)
+class TestGetAppVersion:
+    """oddfar/campus-imaotai#394 -> #397: HTML-scraping the App Store page
+    for the version broke silently after Apple redesigned it to a JS SPA,
+    sending MT-APP-Version: null and getting rejected with code 4821. Fixed
+    by switching to the iTunes lookup JSON API (also used by AkenClub/
+    ken-iMoutai-Script and 397179459/iMaoTai-reserve)."""
+
+    def test_uses_itunes_lookup_version(self):
+        response = MagicMock()
+        response.json.return_value = {"results": [{"version": "2.3.1"}]}
+        response.raise_for_status.return_value = None
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == "2.3.1"
+        mock_client.get.assert_called_once_with(imaotai_api._ITUNES_LOOKUP_URL)
+
+    def test_falls_back_on_empty_results(self):
+        response = MagicMock()
+        response.json.return_value = {"results": []}
+        response.raise_for_status.return_value = None
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == imaotai_api._FALLBACK_APP_VERSION
+
+    def test_falls_back_on_request_failure_instead_of_raising(self):
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.side_effect = httpx.ConnectError("boom")
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == imaotai_api._FALLBACK_APP_VERSION
+
+
+@patch("core.imaotai_api._cache_set", lambda *a, **k: None)
+@patch("core.imaotai_api._cache_get", lambda *a, **k: None)
 @patch("core.imaotai_api.get_app_version", lambda: "1.7.6")
 class TestRealApiContract:
     def test_send_verify_code_success(self):
