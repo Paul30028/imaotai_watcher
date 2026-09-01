@@ -1,0 +1,6 @@
+# Minimal deps for gh_action_reserve.py -- deliberately a subset of
+# requirements.txt. The Docker image needs fastapi/sqlalchemy/apscheduler/etc
+# for the full web app; the Actions runner only ever imports core.imaotai_api,
+# core.notifier and utils.signature, which need nothing beyond these two.
+httpx==0.27.0
+pycryptodome==3.20.0

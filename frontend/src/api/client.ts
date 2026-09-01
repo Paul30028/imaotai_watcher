@@ -23,3 +23,12 @@ client.interceptors.response.use(
 )
 
 export default client
+
+/** Pull FastAPI's {"detail": "..."} out of an axios error, falling back to
+ * a generic message. Backend errors (duplicate phone, i茅台 rate-limited,
+ * etc.) are meaningful and specific -- swallowing them behind a generic
+ * "check your input" message is what makes a user retry the wrong thing. */
+export function extractErrorMessage(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+  return typeof detail === 'string' && detail ? detail : fallback
+}

@@ -1,10 +1,8 @@
 """
-独立调度器进程。
-
-i茅台官方申购入口只在每天 9:00-9:59 这一个小时内开放，所有账号在同一秒
-并发打接口容易被限流，所以真实策略是：每个账号在这一小时内随机（或固定）
-分配一个分钟，逐分钟轮询、到点才触发该账号的申购（对应 campus-imaotai 的
-updateUserMinuteBatch + reservationBatchTask）。本文件在这个前提下驱动
+调度逻辑：i茅台官方申购入口只在每天 9:00-9:59 这一个小时内开放，所有账号在
+同一秒并发打接口容易被限流，所以真实策略是：每个账号在这一小时内随机（或
+固定）分配一个分钟，逐分钟轮询、到点才触发该账号的申购（对应
+campus-imaotai 的 updateUserMinuteBatch + reservationBatchTask）。本模块驱动
 四类定时任务：
 
   01:10                    为当日所有 active 账号分配 target_minute
@@ -12,15 +10,13 @@ updateUserMinuteBatch + reservationBatchTask）。本文件在这个前提下驱
   refresh_times（默认多个早晨时间点） 预热 version/session/shop 缓存
   results_query_time（默认 18:05）    查询官方公布的申购结果并回填日志
 
-BackgroundScheduler 在后台线程执行以上任务；主线程循环更新 Redis 心跳 +
-BRPOP 等待手动触发（立即申购 / 配置变更后重新排班）。
+调度器现在作为 FastAPI 应用生命周期内的一个后台线程运行（见 main.py 的
+lifespan），不再是独立的容器/进程，也就不需要用 Redis 心跳/队列在进程间
+通信了——"立即申购"直接开一个后台线程执行，"重新排班"直接调用
+reschedule()，都是同进程内的普通函数调用。
 """
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
 import random
+import threading
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,19 +27,16 @@ from models.models import Account, SchedulerState
 from core.purchase import run_all_purchases, run_purchase_for_accounts, confirm_all_results
 from core.imaotai_api import refresh_catalogue_cache
 from core.notifier import send_server_chan
-from redis_client import get_redis
 from utils.logger import get_logger
 
 logger = get_logger("scheduler")
-
-HEARTBEAT_KEY = "scheduler:heartbeat"
-TRIGGER_KEY = "scheduler:trigger"
-HEARTBEAT_TTL = 60  # seconds
 
 # i茅台的申购窗口是按北京时间定义的（固定 9:00-9:59），与容器/宿主机的系统时区
 # 无关（很多云主机默认是 UTC）。用固定偏移量而不是 IANA 时区名，这样不依赖
 # tzdata 是否安装在镜像里，所有 cron 触发和"当前分钟"判断都显式基于这个时区。
 CN_TZ = timezone(timedelta(hours=8))
+
+_scheduler: BackgroundScheduler | None = None
 
 
 def get_send_key(db) -> str:
@@ -221,30 +214,37 @@ def reschedule(scheduler: BackgroundScheduler) -> None:
     )
 
 
-def main() -> None:
-    """主程序入口"""
-    redis = get_redis()
-    scheduler = BackgroundScheduler()
-    scheduler.start()
-    reschedule(scheduler)
-
-    logger.info("调度器进程启动，等待任务...")
-
-    while True:
-        # 更新心跳
-        redis.setex(HEARTBEAT_KEY, HEARTBEAT_TTL, "1")
-
-        # 阻塞等待 trigger 消息，最多 30s
-        result = redis.brpop(TRIGGER_KEY, timeout=30)
-        if result:
-            _, message = result
-            if message == b"reschedule" or message == "reschedule":
-                logger.info("收到 reschedule 指令，重新配置调度")
-                reschedule(scheduler)
-            else:
-                logger.info("收到手动触发指令，立即执行申购")
-                manual_purchase_job()
+# --------------------------------------------------------------------- #
+# lifecycle -- called from main.py's FastAPI lifespan
+# --------------------------------------------------------------------- #
+def start_scheduler() -> BackgroundScheduler:
+    """启动调度器（应用启动时调用一次），返回的实例由本模块自己持有，
+    is_alive()/apply_reschedule()/trigger_manual_purchase() 都基于它。"""
+    global _scheduler
+    _scheduler = BackgroundScheduler()
+    _scheduler.start()
+    reschedule(_scheduler)
+    logger.info("调度器已启动（应用内后台线程）")
+    return _scheduler
 
 
-if __name__ == "__main__":
-    main()
+def stop_scheduler() -> None:
+    global _scheduler
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
+
+
+def is_alive() -> bool:
+    return _scheduler is not None and _scheduler.running
+
+
+def apply_reschedule() -> None:
+    """配置变更（如申购窗口小时）后调用，立即按新配置重新排班。"""
+    if _scheduler is not None:
+        reschedule(_scheduler)
+
+
+def trigger_manual_purchase() -> None:
+    """"立即申购"：在后台线程里跑，不阻塞发起请求的 HTTP 线程。"""
+    threading.Thread(target=manual_purchase_job, daemon=True).start()

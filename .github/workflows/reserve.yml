@@ -1,0 +1,34 @@
+name: i茅台申购（GitHub Actions 版）
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 申购窗口是北京时间 9:00-9:59。GitHub 的 schedule 触发在高峰期可能延迟
+    # 几分钟，所以在窗口内排两次尝试兜底：UTC 00:58/01:05 = 北京时间 08:58/09:05
+    - cron: '58 0 * * *'
+    - cron: '5 1 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  reserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install --no-cache-dir -r requirements-actions.txt
+
+      - name: Run reservation
+        working-directory: backend
+        env:
+          IMAOTAI_ACCOUNTS: ${{ secrets.IMAOTAI_ACCOUNTS }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python gh_action_reserve.py

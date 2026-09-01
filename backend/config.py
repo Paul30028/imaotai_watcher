@@ -11,32 +11,11 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str
 
-    # MySQL
-    mysql_host: str
-    mysql_port: int = 3306
-    mysql_database: str
-    mysql_user: str
-    mysql_password: str
-
-    # Redis
-    redis_host: str
-    redis_port: int = 6379
-    redis_password: str = ""
-    redis_db: int = 0
-
-    @property
-    def mysql_url(self) -> str:
-        return (
-            f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}"
-            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
-            "?charset=utf8mb4"
-        )
-
-    @property
-    def redis_url(self) -> str:
-        if self.redis_password:
-            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
-        return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+    # SQLite file path. A single-file embedded database is enough for a
+    # personal/self-hosted single-instance app -- no separate DB server to
+    # run or configure. Override with a full SQLAlchemy URL if you really
+    # want something else (e.g. "postgresql+psycopg://...").
+    database_url: str = "sqlite:///./data/imaotai.db"
 
     class Config:
         env_file = ".env"

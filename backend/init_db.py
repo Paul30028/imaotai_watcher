@@ -1,16 +1,18 @@
-"""Run once (also on every api-container startup) to create tables, seed the
-admin user, and apply lightweight column migrations for existing databases.
+"""Run once (also on every app startup) to create tables, seed the admin
+user, and apply lightweight column migrations for existing databases.
 
-There's no Alembic in this project; for a MySQL-backed app this small a
-plain `ADD COLUMN IF NOT EXISTS` pass is enough and avoids pulling in a
-whole migration framework for a handful of additive columns.
+There's no Alembic in this project; for a SQLite-backed single-user app
+this small an `ADD COLUMN` pass is enough and avoids pulling in a whole
+migration framework for a handful of additive columns. Uses SQLAlchemy's
+inspector rather than raw INFORMATION_SCHEMA queries so it isn't tied to
+one specific database engine.
 """
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from database import engine, Base, SessionLocal
 from models.models import User, SchedulerState
 from passlib.context import CryptContext
@@ -23,16 +25,16 @@ logger = get_logger(__name__)
 # columns introduced when the imaotai API layer was corrected to match the
 # real i茅台 backend (see backend/core/imaotai_api.py)
 _ACCOUNT_MIGRATIONS = [
-    ("cookie", "TEXT NULL"),
+    ("cookie", "TEXT"),
     ("province_name", "VARCHAR(32) NOT NULL DEFAULT ''"),
     ("city_name", "VARCHAR(32) NOT NULL DEFAULT ''"),
     ("lat", "VARCHAR(32) NOT NULL DEFAULT ''"),
     ("lng", "VARCHAR(32) NOT NULL DEFAULT ''"),
-    ("shop_type", "INT NOT NULL DEFAULT 1"),
-    ("random_minute", "TINYINT(1) NOT NULL DEFAULT 1"),
-    ("fixed_minute", "INT NULL"),
-    ("target_minute", "INT NULL"),
-    ("target_minute_date", "VARCHAR(10) NULL"),
+    ("shop_type", "INTEGER NOT NULL DEFAULT 1"),
+    ("random_minute", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("fixed_minute", "INTEGER"),
+    ("target_minute", "INTEGER"),
+    ("target_minute_date", "VARCHAR(10)"),
 ]
 _SCHEDULER_STATE_MIGRATIONS = [
     ("results_query_time", "VARCHAR(8) NOT NULL DEFAULT '18:05'"),
@@ -41,16 +43,7 @@ _SCHEDULER_STATE_MIGRATIONS = [
 
 
 def _add_missing_columns(conn, table: str, columns: list[tuple[str, str]]) -> None:
-    existing = {
-        row[0]
-        for row in conn.execute(
-            text(
-                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table"
-            ),
-            {"table": table},
-        )
-    }
+    existing = {col["name"] for col in inspect(conn).get_columns(table)}
     for name, ddl in columns:
         if name in existing:
             continue
@@ -59,9 +52,13 @@ def _add_missing_columns(conn, table: str, columns: list[tuple[str, str]]) -> No
 
 
 def migrate_schema() -> None:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
     with engine.begin() as conn:
-        _add_missing_columns(conn, "accounts", _ACCOUNT_MIGRATIONS)
-        _add_missing_columns(conn, "scheduler_state", _SCHEDULER_STATE_MIGRATIONS)
+        if "accounts" in existing_tables:
+            _add_missing_columns(conn, "accounts", _ACCOUNT_MIGRATIONS)
+        if "scheduler_state" in existing_tables:
+            _add_missing_columns(conn, "scheduler_state", _SCHEDULER_STATE_MIGRATIONS)
         # city_code predates the real-API rewrite and is no longer read;
         # left in place (not dropped) so a downgrade never loses data.
 

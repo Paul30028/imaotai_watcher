@@ -1,6 +1,9 @@
 import json
 from unittest.mock import patch, MagicMock
 
+import httpx
+import pytest
+
 import core.imaotai_api as imaotai_api
 from core.imaotai_api import (
     MoutaiError,
@@ -12,6 +15,106 @@ from core.imaotai_api import (
     send_verify_code,
 )
 from utils.signature import aes_decrypt
+
+
+def _make_response(status_code: int) -> httpx.Response:
+    request = httpx.Request("POST", "https://app.moutai519.com.cn/xhr/front/user/register/vcode")
+    return httpx.Response(status_code, request=request, json={"code": status_code})
+
+
+class TestRequestRetryBehavior:
+    """A 4xx means the request itself won't succeed on retry -- most
+    importantly 429 (rate limited), where retrying immediately just
+    hammers an endpoint that already told us to back off. Only network
+    failures and 5xx are worth retrying."""
+
+    def test_429_is_not_retried(self):
+        response = _make_response(429)
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.HTTPStatusError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 1
+
+    def test_500_is_retried(self):
+        response = _make_response(500)
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.HTTPStatusError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 3
+
+    def test_network_error_is_retried(self):
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls, \
+             patch("core.imaotai_api.time.sleep"):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.request.side_effect = httpx.ConnectError("boom")
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.ConnectError):
+                imaotai_api._request("POST", "https://example.test/vcode", {})
+
+        assert mock_client.request.call_count == 3
+
+
+@patch("core.imaotai_api._cache_set", lambda *a, **k: None)
+@patch("core.imaotai_api._cache_get", lambda *a, **k: None)
+class TestGetAppVersion:
+    """oddfar/campus-imaotai#394 -> #397: HTML-scraping the App Store page
+    for the version broke silently after Apple redesigned it to a JS SPA,
+    sending MT-APP-Version: null and getting rejected with code 4821. Fixed
+    by switching to the iTunes lookup JSON API (also used by AkenClub/
+    ken-iMoutai-Script and 397179459/iMaoTai-reserve)."""
+
+    def test_uses_itunes_lookup_version(self):
+        response = MagicMock()
+        response.json.return_value = {"results": [{"version": "2.3.1"}]}
+        response.raise_for_status.return_value = None
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == "2.3.1"
+        mock_client.get.assert_called_once_with(imaotai_api._ITUNES_LOOKUP_URL)
+
+    def test_falls_back_on_empty_results(self):
+        response = MagicMock()
+        response.json.return_value = {"results": []}
+        response.raise_for_status.return_value = None
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.return_value = response
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == imaotai_api._FALLBACK_APP_VERSION
+
+    def test_falls_back_on_request_failure_instead_of_raising(self):
+        with patch("core.imaotai_api.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.get.side_effect = httpx.ConnectError("boom")
+            mock_client_cls.return_value = mock_client
+
+            version = imaotai_api.get_app_version()
+        assert version == imaotai_api._FALLBACK_APP_VERSION
 
 
 @patch("core.imaotai_api._cache_set", lambda *a, **k: None)
@@ -27,6 +130,16 @@ class TestRealApiContract:
         body = kwargs["json"]
         assert body["mobile"] == "13800138000"
         assert "md5" in body and "timestamp" in body
+        # vcode/login only need this minimal header set -- confirmed against
+        # AkenClub/ken-iMoutai-Script, an actively maintained reference with
+        # real confirmed reservation successes that never sends MT-Bundle-ID/
+        # MT-Info/MT-K/MT-R/MT-Lat/MT-Lng on these two endpoints.
+        headers = args[2]
+        assert headers["MT-Device-ID"] == "device-1"
+        assert headers["MT-APP-Version"] == "1.7.6"
+        assert "MT-R" not in headers
+        assert "MT-K" not in headers
+        assert "MT-Info" not in headers
 
     def test_send_verify_code_failure_raises(self):
         with patch("core.imaotai_api._request", return_value={"code": 4000, "message": "手机号格式错误"}):
@@ -162,6 +275,15 @@ class TestRealApiContract:
                 ]
             },
         }
-        with patch("core.imaotai_api._request", return_value=resp):
+        with patch("core.imaotai_api._request", return_value=resp) as mock_req:
             rows = query_results("device-1", "tok")
         assert len(rows) == 2  # 过滤逻辑放在业务层(core.purchase)，这里只做原样透传
+        args, _ = mock_req.call_args
+        # queryV2, not the deprecated query -- confirmed against
+        # AkenClub/ken-iMoutai-Script's currently working endpoint.
+        assert args[1] == imaotai_api._RESULTS_URL
+        assert args[1].endswith("queryV2")
+        headers = args[2]
+        assert headers["MT-Token"] == "tok"
+        assert headers["MT-R"] == imaotai_api._MT_R_HEADER
+        assert headers["MT-SN"] == imaotai_api._MT_SN_HEADER

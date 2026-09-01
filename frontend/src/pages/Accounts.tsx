@@ -10,10 +10,12 @@ import {
   accountLogin,
   createAccount,
   deleteAccount,
+  getGhActionConfig,
   listAccounts,
   sendVerifyCode,
   updateAccount,
 } from '../api/accounts'
+import { extractErrorMessage } from '../api/client'
 
 const { Title } = Typography
 
@@ -147,8 +149,8 @@ export default function Accounts() {
     try {
       await sendVerifyCode(account.id)
       message.success('验证码已发送')
-    } catch {
-      message.error('发送验证码失败')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '发送验证码失败'))
       setModalMode(null)
     } finally {
       setSubmitting(false)
@@ -186,25 +188,37 @@ export default function Accounts() {
       return
     }
     setSubmitting(true)
+    const payload: AccountCreatePayload = {
+      phone: values.phone,
+      province_name: values.province_name,
+      city_name: values.city_name,
+      lat: values.lat,
+      lng: values.lng,
+      shop_type: values.shop_type,
+      random_minute: values.random_minute,
+      fixed_minute: values.random_minute ? null : values.fixed_minute,
+    }
+    let newId: number
     try {
-      const payload: AccountCreatePayload = {
-        phone: values.phone,
-        province_name: values.province_name,
-        city_name: values.city_name,
-        lat: values.lat,
-        lng: values.lng,
-        shop_type: values.shop_type,
-        random_minute: values.random_minute,
-        fixed_minute: values.random_minute ? null : values.fixed_minute,
-      }
       const res = await createAccount(payload)
-      const newId = res.data.id
+      newId = res.data.id
+    } catch (err) {
+      message.error(extractErrorMessage(err, '添加账号失败，请检查手机号是否正确'))
+      setSubmitting(false)
+      return
+    }
+    try {
       await sendVerifyCode(newId)
       message.success('验证码已发送')
       verifyForm.resetFields()
       setAddFlowState({ step: 1, accountId: newId })
-    } catch {
-      message.error('发送验证码失败，请检查手机号是否正确')
+    } catch (err) {
+      // 账号已经创建成功了，只是这一步发验证码失败（比如被限流）——
+      // 关掉弹窗、刷新列表，用户可以之后用"刷新Token"重试，而不是
+      // 让 ta 以为要重新走一遍添加账号（那样只会撞上手机号已存在）。
+      message.error(extractErrorMessage(err, '发验证码失败'))
+      closeModal()
+      fetchAccounts()
     } finally {
       setSubmitting(false)
     }
@@ -225,8 +239,8 @@ export default function Accounts() {
       message.success('登录成功')
       closeModal()
       fetchAccounts()
-    } catch {
-      message.error('验证码错误或已过期')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '验证码错误或已过期'))
     } finally {
       setSubmitting(false)
     }
@@ -255,10 +269,24 @@ export default function Accounts() {
       message.success('更新成功')
       closeModal()
       fetchAccounts()
-    } catch {
-      message.error('更新失败')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '更新失败'))
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleCopyGhActionConfig = async () => {
+    try {
+      const res = await getGhActionConfig()
+      if (res.data.length === 0) {
+        message.warning('没有已登录的账号，请先添加账号并完成验证码登录')
+        return
+      }
+      await navigator.clipboard.writeText(JSON.stringify(res.data, null, 2))
+      message.success('已复制到剪贴板，粘贴到 GitHub 仓库的 IMAOTAI_ACCOUNTS Secret 里即可（见 RUNNING.md「路径三」）')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '获取配置失败'))
     }
   }
 
@@ -267,8 +295,8 @@ export default function Accounts() {
       await deleteAccount(id)
       message.success('删除成功')
       fetchAccounts()
-    } catch {
-      message.error('删除失败')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '删除失败'))
     }
   }
 
@@ -361,9 +389,14 @@ export default function Accounts() {
     <div style={{ padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>账号管理</Title>
-        <Button type="primary" onClick={openAddModal}>
-          添加账号
-        </Button>
+        <Space>
+          <Button onClick={handleCopyGhActionConfig}>
+            复制 GitHub Actions 配置
+          </Button>
+          <Button type="primary" onClick={openAddModal}>
+            添加账号
+          </Button>
+        </Space>
       </div>
 
       <Table

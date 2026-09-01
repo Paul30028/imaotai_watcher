@@ -14,20 +14,19 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
-from redis_client import get_redis
 from utils.logger import get_logger
+from utils.memcache import cache
 from utils.signature import aes_encrypt, md5_signature
 
 logger = get_logger(__name__)
 
-_APP_STORE_URL = "https://apps.apple.com/cn/app/i%E8%8C%85%E5%8F%B0/id1600482450"
+_ITUNES_LOOKUP_URL = "https://itunes.apple.com/cn/lookup?id=1600482450"
 _APP_BASE = "https://app.moutai519.com.cn"
 _STATIC_BASE = "https://static.moutai519.com.cn/mt-backend"
 _VCODE_URL = f"{_APP_BASE}/xhr/front/user/register/vcode"
@@ -36,13 +35,23 @@ _RESOURCE_URL = f"{_STATIC_BASE}/xhr/front/mall/resource/get"
 _SESSION_URL = f"{_STATIC_BASE}/xhr/front/mall/index/session/get/{{day_ts}}"
 _PROVINCE_SHOPS_URL = f"{_STATIC_BASE}/xhr/front/mall/shop/list/slim/v3/{{session_id}}/{{province}}/{{item_id}}/{{day_ts}}"
 _RESERVE_URL = f"{_APP_BASE}/xhr/front/mall/reservation/add"
-_RESULTS_URL = f"{_APP_BASE}/xhr/front/mall/reservation/list/pageOne/query"
+_RESULTS_URL = f"{_APP_BASE}/xhr/front/mall/reservation/list/pageOne/queryV2"
 
-# Fixed device-info header the app sends on every reservation call, captured
-# from a live app session. If reservations start failing with an MT-Info
-# related error, this needs to be re-extracted from a current app build.
+# Fixed device-info header the app sends on every call, captured from a live
+# app session. If requests start failing with an MT-Info related error, this
+# needs to be re-extracted from a current app build.
 _MT_INFO_HEADER = "028e7f96f6369cafe1d105579c5b9377"
 _USER_AGENT = "iOS;16.3;Apple;?unrecognized?"
+_MT_BUNDLE_ID = "com.moutai.mall"
+
+# MT-R/MT-SN are opaque, base64-looking anti-fraud tokens. Cross-checked
+# against AkenClub/ken-iMoutai-Script (an actively maintained, independently
+# written Python client with confirmed real reservation successes): that
+# client sends these two ONLY on the results-query endpoint, as this same
+# static pair -- and never on vcode/login/reserve. So they're not required
+# everywhere, and a hardcoded value is apparently accepted there in practice.
+_MT_R_HEADER = "clips_OlU6TmFRag5rCXwbNAQ/Tz1SKlN8THcecBp/HGhHdw=="
+_MT_SN_HEADER = "clips_ehwpSC0fLBggRnJAdxYgFiAYLxl9Si5PfEl/TC0afkw="
 _PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None
 _TIMEOUT = 10
 
@@ -59,22 +68,15 @@ class MoutaiError(RuntimeError):
 
 
 # --------------------------------------------------------------------- #
-# shared cache (Redis-backed so the `api` and `scheduler` containers see
-# the same warmed data instead of each re-fetching independently)
+# shared cache: in-process, since the scheduler now runs as a background
+# thread inside the same API process instead of a separate container.
 # --------------------------------------------------------------------- #
 def _cache_get(key: str) -> Any | None:
-    try:
-        raw = get_redis().get(_CACHE_PREFIX + key)
-    except Exception:  # noqa: BLE001 - cache is best-effort
-        return None
-    return json.loads(raw) if raw else None
+    return cache.get(_CACHE_PREFIX + key)
 
 
 def _cache_set(key: str, value: Any, ttl: int) -> None:
-    try:
-        get_redis().setex(_CACHE_PREFIX + key, ttl, json.dumps(value))
-    except Exception:  # noqa: BLE001
-        logger.warning("写入缓存失败: %s", key)
+    cache.set(_CACHE_PREFIX + key, value, ttl)
 
 
 def _day_start_ms() -> int:
@@ -85,6 +87,16 @@ def _day_start_ms() -> int:
 
 
 _RETRY_DELAYS = [1, 2]  # seconds, applied after the first attempt
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """4xx responses (bad request, auth, and critically 429 rate-limit) won't
+    succeed on an identical retry -- retrying them just hammers an endpoint
+    that already told us to back off. Only network-layer failures and 5xx
+    server errors are worth retrying."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return True
 
 
 def _request(method: str, url: str, headers: dict, **kwargs) -> dict:
@@ -100,30 +112,91 @@ def _request(method: str, url: str, headers: dict, **kwargs) -> dict:
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             logger.warning("%s %s 第%d次失败: %s", method, url, attempt + 1, exc)
+            if not _is_retryable(exc):
+                break
     raise last_exc  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------- #
 # app version
 # --------------------------------------------------------------------- #
+_FALLBACK_APP_VERSION = "1.9.7"
+
+
 def get_app_version() -> str:
+    """The real app sends its App Store version in MT-APP-Version on every
+    call; a stale/missing one is a confirmed rejection cause (oddfar/
+    campus-imaotai#394 -> #397: an HTML-scraping regex against the App
+    Store page broke silently after Apple redesigned it to a JS-rendered
+    SPA, sent MT-APP-Version: null, and got code 4821 back). That fix
+    switched to the iTunes lookup API, which both AkenClub/ken-iMoutai-
+    Script and 397179459/iMaoTai-reserve also use -- real JSON, not HTML
+    scraping, so it isn't exposed to future page-markup changes the same
+    way. Same approach here."""
     cached = _cache_get("version")
     if cached:
         return cached
-    with httpx.Client(timeout=_TIMEOUT, proxy=_PROXY) as client:
-        resp = client.get(_APP_STORE_URL)
-    match = re.search(r'new__latest__version">(.*?)</p>', resp.text, re.DOTALL)
-    version = match.group(1).replace("版本 ", "").strip() if match else "1.7.6"
+    version = _FALLBACK_APP_VERSION
+    try:
+        with httpx.Client(timeout=_TIMEOUT, proxy=_PROXY) as client:
+            resp = client.get(_ITUNES_LOOKUP_URL)
+            resp.raise_for_status()
+        results = resp.json().get("results") or []
+        if results and results[0].get("version"):
+            version = results[0]["version"]
+        else:
+            logger.warning("iTunes lookup 返回空结果，使用回退版本号 %s", version)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("获取 App 版本号失败，使用回退版本号 %s: %s", version, e)
     _cache_set("version", version, _CACHE_TTL_VERSION)
     return version
 
 
-def _base_headers(device_id: str) -> dict:
+def _auth_headers(device_id: str) -> dict:
+    """vcode/login only need this minimal set -- confirmed against
+    AkenClub/ken-iMoutai-Script (actively maintained, real confirmed
+    reservation successes). The earlier full header set (MT-Bundle-ID,
+    MT-Info, MT-K, MT-R, MT-Lat/Lng, ...) copied from a closed-source GUI
+    reference was never actually required here and just added surface
+    area for something to go wrong."""
     return {
         "MT-Device-ID": device_id,
         "MT-APP-Version": get_app_version(),
         "User-Agent": _USER_AGENT,
         "Content-Type": "application/json",
+    }
+
+
+def _reserve_headers(device_id: str, token: str, user_id: str, lat: str, lng: str) -> dict:
+    return {
+        "User-Agent": _USER_AGENT,
+        "MT-Token": token,
+        "MT-Network-Type": "WIFI",
+        "MT-User-Tag": "0",
+        "MT-K": str(int(time.time() * 1000)),
+        "MT-Info": _MT_INFO_HEADER,
+        "MT-APP-Version": get_app_version(),
+        "Accept-Language": "zh-Hans-CN;q=1",
+        "MT-Device-ID": device_id,
+        "MT-Bundle-ID": _MT_BUNDLE_ID,
+        "MT-Lng": lng,
+        "MT-Lat": lat,
+        "Content-Type": "application/json",
+        "userId": str(user_id),
+    }
+
+
+def _query_headers(device_id: str, token: str) -> dict:
+    return {
+        "MT-Device-ID": device_id,
+        "MT-APP-Version": get_app_version(),
+        "MT-Token": token,
+        "MT-Network-Type": "WIFI",
+        "MT-User-Tag": "0",
+        "MT-K": str(int(time.time() * 1000)),
+        "MT-Bundle-ID": _MT_BUNDLE_ID,
+        "MT-R": _MT_R_HEADER,
+        "MT-SN": _MT_SN_HEADER,
     }
 
 
@@ -133,7 +206,7 @@ def _base_headers(device_id: str) -> dict:
 def send_verify_code(phone: str, device_id: str) -> None:
     ts = int(time.time() * 1000)
     body = {"mobile": phone, "md5": md5_signature(phone, ts), "timestamp": str(ts)}
-    result = _request("POST", _VCODE_URL, _base_headers(device_id), json=body)
+    result = _request("POST", _VCODE_URL, _auth_headers(device_id), json=body)
     if str(result.get("code")) != "2000":
         raise MoutaiError(f"发送验证码失败: {result}")
 
@@ -148,7 +221,7 @@ def login(phone: str, verify_code: str, device_id: str) -> dict:
         "timestamp": str(ts),
         "MT-APP-Version": get_app_version(),
     }
-    result = _request("POST", _LOGIN_URL, _base_headers(device_id), json=body)
+    result = _request("POST", _LOGIN_URL, _auth_headers(device_id), json=body)
     if str(result.get("code")) != "2000":
         raise MoutaiError(f"登录失败: {result}")
     data = result["data"]
@@ -286,16 +359,7 @@ def reserve_item(
     }
     payload["actParam"] = aes_encrypt(json.dumps(payload, separators=(",", ":")))
 
-    headers = _base_headers(device_id)
-    headers.update(
-        {
-            "MT-Lat": lat,
-            "MT-Lng": lng,
-            "MT-Token": token,
-            "MT-Info": _MT_INFO_HEADER,
-            "userId": user_id,
-        }
-    )
+    headers = _reserve_headers(device_id, token, user_id, lat, lng)
     result = _request("POST", _RESERVE_URL, headers, json=payload)
     if str(result.get("code")) != "2000":
         raise MoutaiError(result.get("message", str(result)))
@@ -303,8 +367,7 @@ def reserve_item(
 
 
 def query_results(device_id: str, token: str) -> list[dict]:
-    headers = _base_headers(device_id)
-    headers["MT-Token"] = token
+    headers = _query_headers(device_id, token)
     result = _request("GET", _RESULTS_URL, headers)
     if str(result.get("code")) != "2000":
         raise MoutaiError(result.get("message", str(result)))
@@ -314,10 +377,7 @@ def query_results(device_id: str, token: str) -> list[dict]:
 def refresh_catalogue_cache() -> None:
     """Force a re-fetch of version/session/shop data (used by the morning
     warm-up jobs so the reservation window doesn't pay the fetch cost)."""
-    try:
-        get_redis().delete(_CACHE_PREFIX + "version", _CACHE_PREFIX + "session_data", _CACHE_PREFIX + "shops")
-    except Exception:  # noqa: BLE001
-        pass
+    cache.delete(_CACHE_PREFIX + "version", _CACHE_PREFIX + "session_data", _CACHE_PREFIX + "shops")
     get_app_version()
     get_session_id()
     get_all_shops()

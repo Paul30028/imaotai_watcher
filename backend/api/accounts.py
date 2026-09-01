@@ -3,11 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from api.deps import get_db, get_current_user, require_admin
-from models.models import Account
+from models.models import Account, Product
 from schemas.schemas import AccountCreate, AccountUpdate, AccountOut, VerifyLoginRequest, MessageResponse, TodayItemOut
 from core.imaotai_api import send_verify_code, login as imaotai_login, get_today_items, MoutaiError
 from utils.signature import generate_device_id
-from redis_client import get_redis
+from utils.memcache import cache
 from utils.logger import get_logger
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -35,6 +35,35 @@ def today_items(_=Depends(get_current_user)):
         TodayItemOut(item_id=str(i.get("itemId")), item_code=i.get("itemCode"), title=i.get("title"))
         for i in items
     ]
+
+
+@router.get("/gh-action-config")
+def gh_action_config(db: Session = Depends(get_db), _=Depends(require_admin)):
+    """一键导出「路径三：GitHub Actions」需要的 IMAOTAI_ACCOUNTS 密钥内容——
+    把所有已登录（有 token）的 active 账号打包成对应的 JSON 数组，直接复制粘贴
+    进 GitHub Secret 即可，不需要手动去数据库里翻 token/device_id。"""
+    accounts = db.query(Account).filter(Account.status == "active", Account.token.isnot(None)).all()
+    result = []
+    for account in accounts:
+        products = db.query(Product).filter(Product.account_id == account.id, Product.enabled == True).all()  # noqa: E712
+        if not products:
+            products = db.query(Product).filter(Product.account_id.is_(None), Product.enabled == True).all()  # noqa: E712
+        result.append(
+            {
+                "phone": account.phone,
+                "device_id": account.device_id,
+                "token": account.token,
+                "user_id": account.user_id,
+                "item_ids": [p.item_code for p in products],
+                "shop_id": "AUTO",
+                "shop_type": account.shop_type,
+                "province": account.province_name,
+                "city": account.city_name,
+                "lat": account.lat,
+                "lng": account.lng,
+            }
+        )
+    return result
 
 
 @router.post("", response_model=AccountOut)
@@ -88,13 +117,12 @@ def send_verify(account_id: int, db: Session = Depends(get_db), _=Depends(requir
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    redis = get_redis()
     limit_key = f"sms:limit:{account.phone}"
-    if redis.exists(limit_key):
+    if cache.exists(limit_key):
         raise HTTPException(status_code=429, detail="60秒内只能发送一次验证码")
     try:
         send_verify_code(account.phone, account.device_id)
-        redis.setex(limit_key, SMS_LIMIT_TTL, "1")
+        cache.set(limit_key, True, SMS_LIMIT_TTL)
         return MessageResponse(message="验证码已发送")
     except Exception as e:
         logger.error(f"发送验证码失败: {e}")
