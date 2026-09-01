@@ -76,23 +76,23 @@ class TestRequestRetryBehavior:
 class TestRealApiContract:
     def test_send_verify_code_success(self):
         with patch("core.imaotai_api._request", return_value={"code": 2000}) as mock_req:
-            send_verify_code("13800138000", "device-1", "22.54", "114.06")
+            send_verify_code("13800138000", "device-1")
         args, kwargs = mock_req.call_args
         assert args[0] == "POST"
         assert args[1] == imaotai_api._VCODE_URL
         body = kwargs["json"]
         assert body["mobile"] == "13800138000"
         assert "md5" in body and "timestamp" in body
-        # These were missing entirely before, which is a plausible reason the
-        # backend rejected vcode/login as not-a-real-app traffic -- locking
-        # in that they're actually sent now.
+        # vcode/login only need this minimal header set -- confirmed against
+        # AkenClub/ken-iMoutai-Script, an actively maintained reference with
+        # real confirmed reservation successes that never sends MT-Bundle-ID/
+        # MT-Info/MT-K/MT-R/MT-Lat/MT-Lng on these two endpoints.
         headers = args[2]
-        assert headers["MT-Bundle-ID"] == "com.moutai.mall"
-        assert headers["MT-Info"] == imaotai_api._MT_INFO_HEADER
-        assert headers["MT-Lat"] == "22.54"
-        assert headers["MT-Lng"] == "114.06"
-        assert headers["MT-R"]
-        assert headers["MT-K"]
+        assert headers["MT-Device-ID"] == "device-1"
+        assert headers["MT-APP-Version"] == "1.7.6"
+        assert "MT-R" not in headers
+        assert "MT-K" not in headers
+        assert "MT-Info" not in headers
 
     def test_send_verify_code_failure_raises(self):
         with patch("core.imaotai_api._request", return_value={"code": 4000, "message": "手机号格式错误"}):
@@ -228,6 +228,15 @@ class TestRealApiContract:
                 ]
             },
         }
-        with patch("core.imaotai_api._request", return_value=resp):
+        with patch("core.imaotai_api._request", return_value=resp) as mock_req:
             rows = query_results("device-1", "tok")
         assert len(rows) == 2  # 过滤逻辑放在业务层(core.purchase)，这里只做原样透传
+        args, _ = mock_req.call_args
+        # queryV2, not the deprecated query -- confirmed against
+        # AkenClub/ken-iMoutai-Script's currently working endpoint.
+        assert args[1] == imaotai_api._RESULTS_URL
+        assert args[1].endswith("queryV2")
+        headers = args[2]
+        assert headers["MT-Token"] == "tok"
+        assert headers["MT-R"] == imaotai_api._MT_R_HEADER
+        assert headers["MT-SN"] == imaotai_api._MT_SN_HEADER

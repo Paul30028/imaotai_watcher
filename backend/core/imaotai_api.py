@@ -36,7 +36,7 @@ _RESOURCE_URL = f"{_STATIC_BASE}/xhr/front/mall/resource/get"
 _SESSION_URL = f"{_STATIC_BASE}/xhr/front/mall/index/session/get/{{day_ts}}"
 _PROVINCE_SHOPS_URL = f"{_STATIC_BASE}/xhr/front/mall/shop/list/slim/v3/{{session_id}}/{{province}}/{{item_id}}/{{day_ts}}"
 _RESERVE_URL = f"{_APP_BASE}/xhr/front/mall/reservation/add"
-_RESULTS_URL = f"{_APP_BASE}/xhr/front/mall/reservation/list/pageOne/query"
+_RESULTS_URL = f"{_APP_BASE}/xhr/front/mall/reservation/list/pageOne/queryV2"
 
 # Fixed device-info header the app sends on every call, captured from a live
 # app session. If requests start failing with an MT-Info related error, this
@@ -45,17 +45,14 @@ _MT_INFO_HEADER = "028e7f96f6369cafe1d105579c5b9377"
 _USER_AGENT = "iOS;16.3;Apple;?unrecognized?"
 _MT_BUNDLE_ID = "com.moutai.mall"
 
-# MT-R is an opaque, base64-looking token the app sends on every call
-# (captured verbatim from a reference client, see hygge-imaotai's
-# IMTService.cs). It's very likely output from a native anti-fraud/device
-# -attestation SDK (the kind that ties a token to one specific device +
-# session), which means replaying this exact same static string from many
-# different installs/devices probably doesn't hold up to server-side
-# validation forever -- there's no known way to regenerate it correctly
-# without the real app's SDK. Treat this as a best-effort placeholder and
-# the most likely remaining culprit if requests keep getting rejected after
-# everything else here checks out.
+# MT-R/MT-SN are opaque, base64-looking anti-fraud tokens. Cross-checked
+# against AkenClub/ken-iMoutai-Script (an actively maintained, independently
+# written Python client with confirmed real reservation successes): that
+# client sends these two ONLY on the results-query endpoint, as this same
+# static pair -- and never on vcode/login/reserve. So they're not required
+# everywhere, and a hardcoded value is apparently accepted there in practice.
 _MT_R_HEADER = "clips_OlU6TmFRag5rCXwbNAQ/Tz1SKlN8THcecBp/HGhHdw=="
+_MT_SN_HEADER = "clips_ehwpSC0fLBggRnJAdxYgFiAYLxl9Si5PfEl/TC0afkw="
 _PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None
 _TIMEOUT = 10
 
@@ -136,44 +133,66 @@ def get_app_version() -> str:
     return version
 
 
-def _base_headers(device_id: str, lat: str = "", lng: str = "") -> dict:
-    """Every call the real app makes carries this full header set, not just
-    MT-Device-ID/MT-APP-Version -- vcode/login were previously missing most
-    of these (MT-Bundle-ID, MT-Lat/Lng, MT-Info, MT-K, MT-R, ...), which is
-    a plausible reason the backend was rejecting them as not-a-real-app
-    traffic. Matched against hygge-imaotai's IMTService.cs, an independent
-    reference implementation."""
+def _auth_headers(device_id: str) -> dict:
+    """vcode/login only need this minimal set -- confirmed against
+    AkenClub/ken-iMoutai-Script (actively maintained, real confirmed
+    reservation successes). The earlier full header set (MT-Bundle-ID,
+    MT-Info, MT-K, MT-R, MT-Lat/Lng, ...) copied from a closed-source GUI
+    reference was never actually required here and just added surface
+    area for something to go wrong."""
     return {
         "MT-Device-ID": device_id,
         "MT-APP-Version": get_app_version(),
         "User-Agent": _USER_AGENT,
         "Content-Type": "application/json",
-        "Accept": "*/*",
-        "MT-Bundle-ID": _MT_BUNDLE_ID,
-        "MT-Info": _MT_INFO_HEADER,
-        "MT-User-Tag": "0",
+    }
+
+
+def _reserve_headers(device_id: str, token: str, user_id: str, lat: str, lng: str) -> dict:
+    return {
+        "User-Agent": _USER_AGENT,
+        "MT-Token": token,
         "MT-Network-Type": "WIFI",
-        "MT-Team-ID": "",
-        "MT-Request-ID": str(int(time.time() * 1000)) + "00",
+        "MT-User-Tag": "0",
         "MT-K": str(int(time.time() * 1000)),
-        "MT-R": _MT_R_HEADER,
-        "MT-Lat": lat,
+        "MT-Info": _MT_INFO_HEADER,
+        "MT-APP-Version": get_app_version(),
+        "Accept-Language": "zh-Hans-CN;q=1",
+        "MT-Device-ID": device_id,
+        "MT-Bundle-ID": _MT_BUNDLE_ID,
         "MT-Lng": lng,
+        "MT-Lat": lat,
+        "Content-Type": "application/json",
+        "userId": str(user_id),
+    }
+
+
+def _query_headers(device_id: str, token: str) -> dict:
+    return {
+        "MT-Device-ID": device_id,
+        "MT-APP-Version": get_app_version(),
+        "MT-Token": token,
+        "MT-Network-Type": "WIFI",
+        "MT-User-Tag": "0",
+        "MT-K": str(int(time.time() * 1000)),
+        "MT-Bundle-ID": _MT_BUNDLE_ID,
+        "MT-R": _MT_R_HEADER,
+        "MT-SN": _MT_SN_HEADER,
     }
 
 
 # --------------------------------------------------------------------- #
 # auth
 # --------------------------------------------------------------------- #
-def send_verify_code(phone: str, device_id: str, lat: str = "", lng: str = "") -> None:
+def send_verify_code(phone: str, device_id: str) -> None:
     ts = int(time.time() * 1000)
     body = {"mobile": phone, "md5": md5_signature(phone, ts), "timestamp": str(ts)}
-    result = _request("POST", _VCODE_URL, _base_headers(device_id, lat, lng), json=body)
+    result = _request("POST", _VCODE_URL, _auth_headers(device_id), json=body)
     if str(result.get("code")) != "2000":
         raise MoutaiError(f"发送验证码失败: {result}")
 
 
-def login(phone: str, verify_code: str, device_id: str, lat: str = "", lng: str = "") -> dict:
+def login(phone: str, verify_code: str, device_id: str) -> dict:
     """Returns {userId, token, cookie}."""
     ts = int(time.time() * 1000)
     body = {
@@ -183,7 +202,7 @@ def login(phone: str, verify_code: str, device_id: str, lat: str = "", lng: str 
         "timestamp": str(ts),
         "MT-APP-Version": get_app_version(),
     }
-    result = _request("POST", _LOGIN_URL, _base_headers(device_id, lat, lng), json=body)
+    result = _request("POST", _LOGIN_URL, _auth_headers(device_id), json=body)
     if str(result.get("code")) != "2000":
         raise MoutaiError(f"登录失败: {result}")
     data = result["data"]
@@ -321,8 +340,7 @@ def reserve_item(
     }
     payload["actParam"] = aes_encrypt(json.dumps(payload, separators=(",", ":")))
 
-    headers = _base_headers(device_id, lat, lng)
-    headers.update({"MT-Token": token, "userId": user_id})
+    headers = _reserve_headers(device_id, token, user_id, lat, lng)
     result = _request("POST", _RESERVE_URL, headers, json=payload)
     if str(result.get("code")) != "2000":
         raise MoutaiError(result.get("message", str(result)))
@@ -330,8 +348,7 @@ def reserve_item(
 
 
 def query_results(device_id: str, token: str) -> list[dict]:
-    headers = _base_headers(device_id)
-    headers["MT-Token"] = token
+    headers = _query_headers(device_id, token)
     result = _request("GET", _RESULTS_URL, headers)
     if str(result.get("code")) != "2000":
         raise MoutaiError(result.get("message", str(result)))

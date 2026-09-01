@@ -92,7 +92,7 @@ def send_verify(account_id: int, db: Session = Depends(get_db), _=Depends(requir
     if cache.exists(limit_key):
         raise HTTPException(status_code=429, detail="60秒内只能发送一次验证码")
     try:
-        send_verify_code(account.phone, account.device_id, account.lat, account.lng)
+        send_verify_code(account.phone, account.device_id)
         cache.set(limit_key, True, SMS_LIMIT_TTL)
         return MessageResponse(message="验证码已发送")
     except Exception as e:
@@ -106,7 +106,7 @@ def account_login(account_id: int, body: VerifyLoginRequest, db: Session = Depen
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        data = imaotai_login(account.phone, body.verify_code, account.device_id, account.lat, account.lng)
+        data = imaotai_login(account.phone, body.verify_code, account.device_id)
         if not data.get("token"):
             raise HTTPException(status_code=400, detail=f"登录失败: {data}")
         account.token = data["token"]
