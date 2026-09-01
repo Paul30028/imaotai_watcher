@@ -10,6 +10,7 @@ import {
   accountLogin,
   createAccount,
   deleteAccount,
+  getGhActionConfig,
   listAccounts,
   sendVerifyCode,
   updateAccount,
@@ -275,6 +276,20 @@ export default function Accounts() {
     }
   }
 
+  const handleCopyGhActionConfig = async () => {
+    try {
+      const res = await getGhActionConfig()
+      if (res.data.length === 0) {
+        message.warning('没有已登录的账号，请先添加账号并完成验证码登录')
+        return
+      }
+      await navigator.clipboard.writeText(JSON.stringify(res.data, null, 2))
+      message.success('已复制到剪贴板，粘贴到 GitHub 仓库的 IMAOTAI_ACCOUNTS Secret 里即可（见 RUNNING.md「路径三」）')
+    } catch (err) {
+      message.error(extractErrorMessage(err, '获取配置失败'))
+    }
+  }
+
   const handleDelete = async (id: number) => {
     try {
       await deleteAccount(id)
@@ -374,9 +389,14 @@ export default function Accounts() {
     <div style={{ padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>账号管理</Title>
-        <Button type="primary" onClick={openAddModal}>
-          添加账号
-        </Button>
+        <Space>
+          <Button onClick={handleCopyGhActionConfig}>
+            复制 GitHub Actions 配置
+          </Button>
+          <Button type="primary" onClick={openAddModal}>
+            添加账号
+          </Button>
+        </Space>
       </div>
 
       <Table

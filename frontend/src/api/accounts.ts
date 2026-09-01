@@ -44,3 +44,4 @@ export const sendVerifyCode = (id: number) => client.post(`/accounts/${id}/verif
 export const accountLogin = (id: number, verify_code: string) =>
   client.post<Account>(`/accounts/${id}/login`, { verify_code })
 export const getTodayItems = () => client.get<TodayItem[]>('/accounts/today-items')
+export const getGhActionConfig = () => client.get<unknown[]>('/accounts/gh-action-config')
